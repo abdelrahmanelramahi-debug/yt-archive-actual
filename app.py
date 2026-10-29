@@ -3841,7 +3841,6 @@ def load_search(settings, scope):
     return {"settings": settings, "anth": anth, "scope": scope, "kw_scope": kw_scope,
             "chunks": chunks, "mat": mat, "lowered": lowered, "embedder": embedder,
             "by_id": {c["chunk_id"]: c for c in chunks},  # chunk lookup for transcript windows
-
             "model_name": model_name, "lang": lang,
             "names": ", ".join(channel_label(c) for c in scope),
             "row_cid": row_cid, "slug_to_cid": slug_to_cid,
@@ -3957,13 +3956,16 @@ def transcript_context(ctx, chunk, before=4, after=4):
         ch = next((c for c in ctx["scope"] if c.get("slug") == chunk.get("_slug")), None)
         if ch is None:
             return one, 0
+        con = None
         try:
             con = kw_db(ch)
             rows = con.execute("SELECT chunk_id, ts, text FROM info WHERE video_id=? ORDER BY chunk_id",
                                (vid,)).fetchall()
-            con.close()
         except Exception:
             rows = []
+        finally:
+            if con is not None:
+                con.close()
         if not rows:
             return one, 0
         pos = next((i for i, r in enumerate(rows) if r[0] == cid),
