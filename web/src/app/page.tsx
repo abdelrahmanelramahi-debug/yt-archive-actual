@@ -488,8 +488,8 @@ export default function Home() {
         <ThemeSelector />
       </header>
 
-      {/* hero + suggestions + ask */}
-      <section className={landing ? "flex min-h-[calc(100dvh-7rem)] flex-col pt-6" : "pt-5"}>
+      {/* hero + suggestions + ask (bottom-anchored on desktop; natural flow on mobile) */}
+      <section className={landing ? "pt-6 sm:flex sm:min-h-[calc(100dvh-7rem)] sm:flex-col" : "pt-5"}>
         {landing && (
           <div className="fade-up mb-8">
             <h1 className="max-w-2xl text-balance font-serif text-[2.1rem] font-medium leading-[1.12] tracking-tight text-ink sm:text-[2.7rem]">
@@ -510,11 +510,11 @@ export default function Home() {
           </div>
         )}
 
-        {/* everything after the hero is anchored to the bottom on landing */}
-        <div className={landing ? "mt-auto" : ""}>
+        {/* bottom-anchored on desktop; a comfortable gap on mobile */}
+        <div className={landing ? "mt-10 sm:mt-auto" : ""}>
           {/* suggestions */}
           {landing && (
-            <div className="fade-up mb-4">
+            <div className="fade-up mb-7 sm:mb-5">
               <p className="mb-2.5 text-xs text-faint">Try one of these</p>
               <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                 {EXAMPLES.map((ex) => (
@@ -535,8 +535,8 @@ export default function Home() {
 
           {/* controls ABOVE the bar: scope / cost on top, the pickers sit right above the bar */}
           {channels.length > 0 && (
-            <div className="mb-3 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between sm:gap-3">
-              <div className="flex flex-col items-start gap-1.5">
+            <div className="mb-6 flex flex-col gap-6 sm:mb-3 sm:flex-row sm:items-end sm:justify-between sm:gap-3">
+              <div className="flex flex-col items-start gap-2.5">
                 {noneSelected ? (
                   <p className="text-[13px] text-danger">Pick at least one channel.</p>
                 ) : (
@@ -546,7 +546,7 @@ export default function Home() {
                 )}
                 <ChannelPicker channels={channels} selected={selected} onChange={setSelected} />
               </div>
-              <div className="flex flex-col items-start gap-1.5 sm:items-end">
+              <div className="flex flex-col items-start gap-2.5 sm:items-end">
                 <ModeExplainer modes={modes} />
                 <p className="text-[13px] text-gold2">≈ {aed(modeUsd)} per answer</p>
                 <ModePicker modes={modes} mode={mode} onChange={setMode} />
