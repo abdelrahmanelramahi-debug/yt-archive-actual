@@ -26,3 +26,7 @@ Thumbs.db
 
 # backups
 *.bak
+
+# packaged data archive (upload to the host separately)
+*.tar.gz
+*.tar.zst
