@@ -4533,6 +4533,53 @@ def first_run_checks(settings):
     return True
 
 
+def publish_data(settings):
+    """Package the search data for the live website into one archive you upload to the data release.
+
+    The website's brain does not see your computer - it loads one data archive at startup. After you
+    add or update channels, run this, upload the file it makes (replacing the old one), then push
+    settings.json. The brain re-pulls the archive whenever it has changed, so the new channels go
+    live on the next redeploy. Only the files the brain actually serves go in (each channel's search
+    index + chunks), so the upload stays small."""
+    import tarfile
+    # Same file name as the live release asset, so "replace the file" keeps the download link valid.
+    out = ROOT / "archive-data.tar.gz"
+    added, missing = 0, []
+    say("Packaging the website's search data ...")
+    with tarfile.open(out, "w:gz") as tar:
+        for ch in settings["channels"]:
+            p = cpaths(ch)
+            chunks = p["data"] / "chunks.jsonl"
+            if not p["search"].exists() or not chunks.exists():
+                missing.append(channel_label(ch))
+                continue
+            tar.add(chunks, arcname=f"{ch['slug']}/data/chunks.jsonl")
+            tar.add(p["search"], arcname=f"{ch['slug']}/search")
+            added += 1
+            say(f"  + {channel_label(ch)}")
+    if not added:
+        warn("No channels have a search index yet - run Update first. Nothing to publish.")
+        try:
+            out.unlink()
+        except OSError:
+            pass
+        return
+    size_mb = out.stat().st_size / 1_000_000
+    say("")
+    ok(f"Built {out.name}: {added} channel(s), {size_mb:,.0f} MB")
+    say(f"  {out}")
+    if missing:
+        warn(f"Skipped (no search index yet): {', '.join(missing)}")
+    say("")
+    say("To put this live (3 steps):")
+    say("  1. Open your data release and replace the file (keep the same name,")
+    say("     archive-data.tar.gz): edit the release, delete the old one, upload this:")
+    say("     https://github.com/abdelrahmanelramahi-debug/yt-archive-actual/releases/tag/data-v1")
+    say("  2. If you ADDED a channel, push settings.json too (GitHub Desktop: commit + push).")
+    say("  3. On Railway, open the brain service and click Redeploy.")
+    say("     New data is live a couple of minutes later.")
+
+
 def menu():
     settings = load_settings()
     if not first_run_checks(settings):
@@ -4551,6 +4598,7 @@ def menu():
             (7, "Settings (speeds, answer language, search model, re-tag, keys)"),
             (8, "Balances and spending"),
             (9, "Open the output folder"),
+            ("p", "Publish data for the website (after adding channels)"),
             ("d", "Find duplicate / excerpt videos"),
             (0, "Exit"),
         ])
@@ -4576,9 +4624,11 @@ def menu():
             elif k == "9":
                 OUTPUT.mkdir(exist_ok=True)
                 open_path(OUTPUT)
+            elif k == "p":
+                publish_data(settings)
             elif k == "d":
                 duplicates_menu(settings)
-            if k in ("1", "2", "3", "8", "d"):
+            if k in ("1", "2", "3", "8", "p", "d"):
                 pause()
         except KeyboardInterrupt:
             warn("\nStopped. Anything finished so far is saved.")
@@ -4609,6 +4659,8 @@ if __name__ == "__main__":
                 ask(s)
             elif cmd == "balance":
                 spending(s)
+            elif cmd == "publish":
+                publish_data(s)
             else:
                 say(__doc__)
     except KeyboardInterrupt:
