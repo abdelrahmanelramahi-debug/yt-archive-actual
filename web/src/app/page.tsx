@@ -829,9 +829,9 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) =>
   );
 }
 
-/* A cited source. The card shows a 3-line transcript peek (the cited line in full contrast,
-   the lines before/after greyed); tapping it opens the surrounding transcript in a scrollable
-   panel with the cited line centred. The arrow icon opens the moment on YouTube. */
+/* A cited source. The title, timestamp and 3-line peek link out to the moment on YouTube (as
+   does the arrow icon); the separate "Read transcript" control opens the surrounding transcript
+   in a scrollable panel with the cited line centred (cited line in full contrast, neighbours greyed). */
 function SourceCard({ s }: { s: Source }) {
   const [open, setOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -861,29 +861,31 @@ function SourceCard({ s }: { s: Source }) {
         <span className="mt-0.5 min-w-6 font-serif text-[15px] font-semibold tabular-nums text-gold">
           {s.n}
         </span>
-        <button
-          type="button"
-          onClick={() => setOpen((o) => !o)}
-          aria-expanded={open}
-          className="min-w-0 flex-1 text-left"
-        >
-          <span className="line-clamp-2 text-sm text-ink" dir="auto">
-            {s.title}
-          </span>
-          <span className="mt-1 block text-xs text-faint">
-            <span className="font-medium text-accent">{s.timestamp}</span>
-            {s.channel ? ` · ${s.channel}` : ""}
-            {s.date ? ` · ${s.date}` : ""}
-          </span>
-          {cited && !open && (
-            <span className="mt-2 block text-[13px] leading-snug" dir="auto">
-              {prev && <span className="block truncate text-faint/60">{prev.text}</span>}
-              <span className="block line-clamp-2 text-ink">{cited.text}</span>
-              {next && <span className="block truncate text-faint/60">{next.text}</span>}
+        <div className="min-w-0 flex-1">
+          <a href={s.url} target="_blank" rel="noopener noreferrer" className="group block">
+            <span className="line-clamp-2 text-sm text-ink group-hover:underline" dir="auto">
+              {s.title}
             </span>
-          )}
+            <span className="mt-1 block text-xs text-faint">
+              <span className="font-medium text-accent group-hover:underline">{s.timestamp}</span>
+              {s.channel ? ` · ${s.channel}` : ""}
+              {s.date ? ` · ${s.date}` : ""}
+            </span>
+            {cited && !open && (
+              <span className="mt-2 block text-[13px] leading-snug" dir="auto">
+                {prev && <span className="block truncate text-faint/60">{prev.text}</span>}
+                <span className="block line-clamp-2 text-ink">{cited.text}</span>
+                {next && <span className="block truncate text-faint/60">{next.text}</span>}
+              </span>
+            )}
+          </a>
           {ctx.length > 1 && (
-            <span className="mt-1.5 flex items-center gap-1 text-[11px] font-medium text-faint">
+            <button
+              type="button"
+              onClick={() => setOpen((o) => !o)}
+              aria-expanded={open}
+              className="mt-1.5 flex items-center gap-1 text-[11px] font-medium text-faint transition hover:text-ink"
+            >
               <svg
                 width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden
                 className={`transition-transform ${open ? "rotate-180" : ""}`}
@@ -891,9 +893,9 @@ function SourceCard({ s }: { s: Source }) {
                 <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
               {open ? "Hide transcript" : "Read transcript"}
-            </span>
+            </button>
           )}
-        </button>
+        </div>
         <a
           href={s.url}
           target="_blank"
