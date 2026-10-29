@@ -1,0 +1,28 @@
+# Secrets - NEVER commit
+.env
+.env.*
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+.models/
+
+# The archive data (embeddings, databases, generated HTML) - large, hosted separately, not in git
+output/
+
+# Node / frontend (added later)
+node_modules/
+.next/
+dist/
+.vercel/
+
+# Scratch / OS
+*.tmp
+*.log
+.DS_Store
+Thumbs.db
+
+# backups
+*.bak

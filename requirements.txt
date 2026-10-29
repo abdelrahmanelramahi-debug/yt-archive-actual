@@ -1,0 +1,6 @@
+apify-client>=1.7
+anthropic>=0.40
+fastembed>=0.4
+numpy
+python-dotenv
+yt-dlp
