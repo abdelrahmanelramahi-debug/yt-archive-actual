@@ -3797,7 +3797,13 @@ def load_search(settings, scope):
             warn(f"{channel_label(ch)}: search is being updated right now, skipping it for this session.")
             continue
         keep = [i for i, cid in enumerate(ids) if cid in by_id]
-        chunks += [by_id[ids[i]] for i in keep]
+        # Stamp each chunk with the channel's CURRENT display name, so renaming a channel
+        # (settings.json) shows on the website without re-indexing the data.
+        name = full_name(ch)
+        kept = [by_id[ids[i]] for i in keep]
+        for c in kept:
+            c["channel"] = name
+        chunks += kept
         mats.append(mat[keep])
     mat = np.vstack(mats) if mats else None
     lowered = [(c["title"] + " " + c["text"]).lower() for c in chunks]
@@ -3848,7 +3854,13 @@ def retrieve(ctx, q):
     if ctx["kw_scope"]:
         terms = keyword_terms(anth, settings["tag_model"], q) + queries
         per = max(40, 160 // len(ctx["kw_scope"]))
-        lists = [kw_search(ch, terms, per) for ch in ctx["kw_scope"]]
+        lists = []
+        for ch in ctx["kw_scope"]:
+            hits = kw_search(ch, terms, per)
+            nm = full_name(ch)  # current display name, so a rename shows without re-indexing
+            for h in hits:
+                h["channel"] = nm
+            lists.append(hits)
         for i in range(max((len(x) for x in lists), default=0)):  # interleave channels
             kw_hits += [x[i] for x in lists if i < len(x)]
     # cast a wide net: many moments across many videos, then synthesise with a deep map-reduce
@@ -4292,6 +4304,7 @@ def channel_menu(settings):
             (9, f"Search type: {'keyword (Arabic-aware)' if ch.get('search') == 'keyword' else 'meaning-based (English)'}"),
             (10, f"Retry failed downloads{f' ({n_failed} waiting)' if n_failed else ' (none)'}"),
             (11, f"{R}Remove channel{X} (files stay in output)"),
+            (12, "Rename (the display name shown on the website)"),
         ], allow_blank=True)
         if not k:
             break
@@ -4338,6 +4351,22 @@ def channel_menu(settings):
                 save_settings(settings)
                 ok(f"Removed. Its files are still in output\\{ch['slug']}.")
                 return
+        elif k == "12":
+            say(f"\nCurrent name: {B}{channel_label(ch)}{X}")
+            new = input("New display name (Enter to cancel): ").strip()
+            if not new or new == full_name(ch):
+                say("No change.")
+            else:
+                ch["name"] = new
+                save_settings(settings)
+                ok(f"Renamed to: {channel_label(ch)}")
+                say(f"{D}The website shows it after you push settings.json and it redeploys (~2 min).{X}")
+                if yes("Push this change to the website now?"):
+                    try:
+                        _git_push_paths(["settings.json"], f"data: rename {ch['slug']}")
+                        ok("Pushed - the new name shows after the redeploy.")
+                    except (subprocess.CalledProcessError, FileNotFoundError):
+                        warn("Could not push automatically - open GitHub Desktop and push settings.json.")
         save_settings(settings)
 
 
@@ -4594,16 +4623,21 @@ def _upload_release_asset(path, token):
     print()  # finish the progress line
 
 
+def _git_push_paths(paths, msg):
+    """Stage the given paths, commit, and push, using the machine's existing git credentials."""
+    subprocess.run(["git", "add", *paths], cwd=str(ROOT), check=True)
+    subprocess.run(["git", "commit", "-m", msg], cwd=str(ROOT), check=True)
+    subprocess.run(["git", "push"], cwd=str(ROOT), check=True)
+
+
 def _git_push_settings():
     """Commit settings.json + a version bump and push, so Railway redeploys and the brain re-pulls.
     The version bump guarantees a redeploy even when only the data (not settings) changed."""
     (ROOT / "deploy").mkdir(exist_ok=True)
     (ROOT / "deploy" / "data.version").write_text(
         f"{datetime.now():%Y-%m-%d %H:%M:%S}\n", encoding="utf-8")
-    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
-    subprocess.run(["git", "add", "settings.json", "deploy/data.version"], cwd=str(ROOT), check=True)
-    subprocess.run(["git", "commit", "-m", f"data: publish {stamp}"], cwd=str(ROOT), check=True)
-    subprocess.run(["git", "push"], cwd=str(ROOT), check=True)
+    _git_push_paths(["settings.json", "deploy/data.version"],
+                    f"data: publish {datetime.now():%Y-%m-%d %H:%M}")
 
 
 def publish_data(settings):
@@ -4673,6 +4707,43 @@ def publish_data(settings):
     except (subprocess.CalledProcessError, FileNotFoundError):
         warn("Data uploaded, but the automatic push did not run.")
         warn("Just open GitHub Desktop and push to finish (or the brain won't see new channels).")
+
+
+def find_channel(settings, key):
+    """Find a channel by slug, @handle, or current display name (case-insensitive)."""
+    k = key.strip().lower().lstrip("@")
+    for ch in settings["channels"]:
+        names = {ch["slug"].strip().lower(),
+                 ch.get("handle", "").strip().lower().lstrip("@"),
+                 full_name(ch).strip().lower()}
+        if k in names:
+            return ch
+    return None
+
+
+def rename_channel_cli(settings, args):
+    """`python app.py rename "<slug or name>" "<new display name>"` - rename a channel from the terminal.
+    Updates the display name the website shows; push settings.json afterwards to make it live."""
+    if len(args) < 2:
+        say('Usage: python app.py rename "<slug or name>" "<new display name>"')
+        say("")
+        say("Channels (use the slug on the left):")
+        for ch in settings["channels"]:
+            say(f"  {ch['slug']}  (now: {channel_label(ch)})")
+        return
+    ch = find_channel(settings, args[0])
+    if not ch:
+        err(f"No channel matches '{args[0]}'. Run `python app.py rename` with no arguments to list them.")
+        return
+    old = channel_label(ch)
+    new = args[1].strip()
+    if not new or new == full_name(ch):
+        say("No change.")
+        return
+    ch["name"] = new
+    save_settings(settings)
+    ok(f"Renamed '{old}' -> '{channel_label(ch)}'.")
+    say("To show it on the website, push settings.json (GitHub Desktop, or `git push`); it redeploys automatically.")
 
 
 def menu():
@@ -4756,6 +4827,8 @@ if __name__ == "__main__":
                 spending(s)
             elif cmd == "publish":
                 publish_data(s)
+            elif cmd == "rename":
+                rename_channel_cli(s, sys.argv[2:])
             else:
                 say(__doc__)
     except KeyboardInterrupt:
