@@ -35,6 +35,68 @@ const STAGES = [
   "Writing a grounded answer",
 ];
 
+function Gate({ onOk }: { onOk: () => void }) {
+  const [code, setCode] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+
+  async function submit(e: React.FormEvent) {
+    e.preventDefault();
+    if (!code.trim() || busy) return;
+    setBusy(true);
+    setErr("");
+    try {
+      const r = await fetch("/api/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ code: code.trim() }),
+      });
+      const d = await r.json();
+      if (r.ok && d.ok) onOk();
+      else setErr(d.error || "That code isn't right.");
+    } catch {
+      setErr("Something went wrong. Try again.");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <main className="grid min-h-[80vh] place-items-center px-5">
+      <div className="fade-up w-full max-w-sm">
+        <div className="mb-6 flex items-center justify-center gap-2.5">
+          <div className="grid h-7 w-7 place-items-center rounded-lg bg-accent/15 text-accent">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M4 6.5C4 5 5 4 6.5 4H18a2 2 0 0 1 2 2v12.5a1.5 1.5 0 0 1-1.5 1.5H6.5A2.5 2.5 0 0 1 4 17.5V6.5Z" stroke="currentColor" strokeWidth="1.6" />
+              <path d="M8 8.5h7M8 12h7M8 15.5h4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+          </div>
+          <span className="text-[15px] font-medium text-fg">The Archive</span>
+        </div>
+        <h1 className="text-center text-lg font-medium text-fg">This archive is invite-only</h1>
+        <p className="mt-1.5 text-center text-sm text-muted">Enter your access code to continue.</p>
+        <form onSubmit={submit} className="mt-5">
+          <input
+            autoFocus
+            value={code}
+            onChange={(e) => setCode(e.target.value)}
+            placeholder="Access code"
+            className="w-full rounded-xl border border-line bg-surface px-4 py-3 text-[15px] text-fg outline-none transition placeholder:text-faint focus:border-line2"
+          />
+          {err && <p className="mt-2 text-sm text-[#f0a8b0]">{err}</p>}
+          <button
+            type="submit"
+            disabled={!code.trim() || busy}
+            className="mt-3 w-full rounded-xl bg-accent py-3 text-sm font-medium text-ink transition enabled:hover:bg-accent2 disabled:opacity-40"
+          >
+            {busy ? "Checking…" : "Enter"}
+          </button>
+        </form>
+      </div>
+    </main>
+  );
+}
+
 export default function Home() {
   const [q, setQ] = useState("");
   const [asked, setAsked] = useState<string | null>(null);
@@ -43,6 +105,15 @@ export default function Home() {
   const [error, setError] = useState<string>("");
   const [stage, setStage] = useState(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const [authed, setAuthed] = useState<boolean | null>(null);
+
+  // check whether this visitor is through the invite gate
+  useEffect(() => {
+    fetch("/api/me")
+      .then((r) => r.json())
+      .then((d) => setAuthed(!!d.authed))
+      .catch(() => setAuthed(false));
+  }, []);
 
   // cycle the loading stage copy while we wait (real token streaming comes next)
   useEffect(() => {
@@ -93,6 +164,13 @@ export default function Home() {
   }
 
   const landing = status === "idle";
+
+  if (authed === null) {
+    return <main className="grid min-h-[70vh] place-items-center text-sm text-faint">Loading…</main>;
+  }
+  if (!authed) {
+    return <Gate onOk={() => setAuthed(true)} />;
+  }
 
   return (
     <main className="mx-auto w-full max-w-3xl px-5 pb-28">

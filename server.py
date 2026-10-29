@@ -12,10 +12,12 @@ Only the frontend should call this. Set BRAIN_KEY in the environment and send it
 (read from .env by app.py), never in the frontend or the browser.
 """
 import os
+import threading
+import time
 from contextlib import asynccontextmanager
 
 import numpy as np
-from fastapi import FastAPI, Header, HTTPException, Query
+from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
 
@@ -25,6 +27,31 @@ STATE = {}
 BRAIN_KEY = os.environ.get("BRAIN_KEY")  # shared secret the frontend sends; unset = open (local dev)
 # Comma-separated list of allowed frontend origins; "*" (default) is for local dev only.
 ALLOW_ORIGINS = [o.strip() for o in os.environ.get("ALLOW_ORIGINS", "*").split(",") if o.strip()]
+
+# Spend caps (protect the Claude bill). Enforced here because the brain is one resident process with
+# memory - a serverless frontend can't hold a reliable counter. The frontend forwards each visitor's
+# real IP as X-Client-IP so the per-person limit works even though every call arrives from Vercel.
+MAX_PER_DAY = int(os.environ.get("MAX_PER_DAY", "300"))        # total questions across everyone / UTC day
+MAX_PER_IP_HOUR = int(os.environ.get("MAX_PER_IP_HOUR", "30"))  # questions per visitor per hour
+_RATE = {"lock": threading.Lock(), "day": "", "day_count": 0, "ip": {}}
+
+
+def _rate_limited(ip):
+    """Returns a message if this request should be blocked, else None (and records the hit)."""
+    now = time.time()
+    today = time.strftime("%Y-%m-%d", time.gmtime(now))
+    with _RATE["lock"]:
+        if _RATE["day"] != today:
+            _RATE.update({"day": today, "day_count": 0, "ip": {}})
+        if _RATE["day_count"] >= MAX_PER_DAY:
+            return "The archive has reached today's question limit. Please try again tomorrow."
+        hits = [t for t in _RATE["ip"].get(ip, []) if now - t < 3600]
+        if len(hits) >= MAX_PER_IP_HOUR:
+            return "That's a lot of questions in a short time - please pause a bit and try again."
+        hits.append(now)
+        _RATE["ip"][ip] = hits
+        _RATE["day_count"] += 1
+        return None
 
 
 @asynccontextmanager
@@ -107,7 +134,8 @@ class AskRequest(BaseModel):
 
 
 @app.post("/ask")
-def ask(req: AskRequest, x_brain_key: str = Header(None)):
+def ask(req: AskRequest, request: Request, x_brain_key: str = Header(None),
+        x_client_ip: str = Header(None)):
     """The full deluxe Q&A for one question. Returns the cited answer + sources as JSON.
     (Token-by-token streaming is added in Phase 2.)"""
     _check_key(x_brain_key)
@@ -115,6 +143,10 @@ def ask(req: AskRequest, x_brain_key: str = Header(None)):
     q = (req.question or "").strip()
     if not q:
         raise HTTPException(status_code=400, detail="empty question")
+    ip = (x_client_ip or (request.client.host if request.client else "") or "unknown").split(",")[0].strip()
+    blocked = _rate_limited(ip)
+    if blocked:
+        raise HTTPException(status_code=429, detail=blocked)
     try:
         res = brain.answer_question(ctx, q)
     except Exception as e:
