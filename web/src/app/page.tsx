@@ -328,7 +328,7 @@ function ChannelPicker({
 function Stat({ n, label }: { n: string; label: string }) {
   return (
     <div>
-      <div className="font-serif text-[1.8rem] font-medium leading-none tracking-tight text-ink">{n}</div>
+      <div className="font-serif text-[1.5rem] font-medium leading-none tracking-tight text-ink sm:text-[1.8rem]">{n}</div>
       <div className="mt-1.5 text-xs text-faint">{label}</div>
     </div>
   );
@@ -491,16 +491,16 @@ export default function Home() {
       {/* hero + suggestions + ask (bottom-anchored on desktop; natural flow on mobile) */}
       <section className={landing ? "pt-6 sm:flex sm:min-h-[calc(100dvh-7rem)] sm:flex-col" : "pt-5"}>
         {landing && (
-          <div className="fade-up mb-8">
-            <h1 className="max-w-2xl text-balance font-serif text-[2.1rem] font-medium leading-[1.12] tracking-tight text-ink sm:text-[2.7rem]">
+          <div className="fade-up mb-6 sm:mb-8">
+            <h1 className="max-w-2xl text-balance font-serif text-[1.6rem] font-medium leading-[1.14] tracking-tight text-ink sm:text-[2.7rem] sm:leading-[1.12]">
               Ask across the archive
             </h1>
-            <p className="mt-4 max-w-xl text-[16px] leading-relaxed text-muted">
+            <p className="mt-3 max-w-xl text-[14px] leading-relaxed text-muted sm:mt-4 sm:text-[16px]">
               Not a fatwa — the words of the scholars themselves, drawn from thousands of hours of
               lectures and debates and traced to the exact moment they were said, with a timestamp
               you can open on the video.
             </p>
-            <div className="mt-7 flex flex-wrap items-center gap-x-7 gap-y-4 sm:gap-x-10">
+            <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-3 sm:mt-7 sm:gap-x-10 sm:gap-y-4">
               <Stat n="20,000+" label="videos" />
               <span className="hidden h-10 w-px bg-line sm:block" />
               <Stat n="1.1M+" label="searchable moments" />
@@ -510,11 +510,11 @@ export default function Home() {
           </div>
         )}
 
-        {/* bottom-anchored on desktop; a comfortable gap on mobile */}
-        <div className={landing ? "mt-10 sm:mt-auto" : ""}>
+        {/* bottom-anchored on desktop; a modest gap on mobile */}
+        <div className={landing ? "mt-6 sm:mt-auto" : ""}>
           {/* suggestions */}
           {landing && (
-            <div className="fade-up mb-7 sm:mb-5">
+            <div className="fade-up mb-5">
               <p className="mb-2.5 text-xs text-faint">Try one of these</p>
               <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
                 {EXAMPLES.map((ex) => (
@@ -535,8 +535,8 @@ export default function Home() {
 
           {/* controls ABOVE the bar: scope / cost on top, the pickers sit right above the bar */}
           {channels.length > 0 && (
-            <div className="mb-6 flex flex-col gap-6 sm:mb-3 sm:flex-row sm:items-end sm:justify-between sm:gap-3">
-              <div className="flex flex-col items-start gap-2.5">
+            <div className="mb-4 flex flex-col gap-4 sm:mb-3 sm:flex-row sm:items-end sm:justify-between sm:gap-3">
+              <div className="flex flex-col items-start gap-2">
                 {noneSelected ? (
                   <p className="text-[13px] text-danger">Pick at least one channel.</p>
                 ) : (
@@ -546,7 +546,7 @@ export default function Home() {
                 )}
                 <ChannelPicker channels={channels} selected={selected} onChange={setSelected} />
               </div>
-              <div className="flex flex-col items-start gap-2.5 sm:items-end">
+              <div className="flex flex-col items-start gap-2 sm:items-end">
                 <ModeExplainer modes={modes} />
                 <p className="text-[13px] text-gold2">≈ {aed(modeUsd)} per answer</p>
                 <ModePicker modes={modes} mode={mode} onChange={setMode} />
