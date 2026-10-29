@@ -3670,6 +3670,15 @@ def render_answer(text):
 
 CAND_MAX = 500        # how many top moments to feed the deep-answer map-reduce per question
 
+# Depth presets for the website's mode picker. More candidates = more thorough, but pricier/slower.
+# `usd` is a typical estimate shown in the UI; the real cost comes back with each answer.
+MODES = {
+    "quick":    {"label": "Quick",    "cand_max": 120,  "per_video": 4, "usd": 0.03},
+    "standard": {"label": "Standard", "cand_max": 500,  "per_video": 6, "usd": 0.08},
+    "deep":     {"label": "Deep",     "cand_max": 1000, "per_video": 8, "usd": 0.17},
+}
+DEFAULT_MODE = "standard"
+
 MAP_PROMPT = """Question: {q}
 
 Below are numbered transcript excerpts from Islamic lectures and Q&A (auto-generated captions, so wording and names may be garbled; ">>" marks a change of speaker). For EACH excerpt that helps answer the question, write ONE concise line: the relevant point, with a short key quote if useful, ending with its number in brackets, e.g. [12]. Skip excerpts that don't address the question. If none are relevant, reply with exactly: NONE
@@ -3787,7 +3796,7 @@ def load_search(settings, scope):
     model_name = SEARCH_MODELS.get(settings["search_model"], SEARCH_MODELS["english"])
     sem_scope = [c for c in scope if c.get("search") != "keyword"]
     kw_scope = [c for c in scope if c.get("search") == "keyword"]
-    chunks, mats = [], []
+    chunks, mats, row_slugs = [], [], []
     for ch in sem_scope:
         p = cpaths(ch)
         ids = read_list(p["search"] / "ids.json")
@@ -3805,7 +3814,12 @@ def load_search(settings, scope):
             c["channel"] = name
         chunks += kept
         mats.append(mat[keep])
+        row_slugs += [ch["slug"]] * len(kept)  # which channel each matrix row belongs to
     mat = np.vstack(mats) if mats else None
+    # Integer channel id per matrix row, so the website's channel picker can mask fast.
+    slug_to_cid = {s: i for i, s in enumerate(dict.fromkeys(row_slugs))}
+    row_cid = (np.array([slug_to_cid[s] for s in row_slugs], dtype=np.int32)
+               if row_slugs else np.zeros(0, dtype=np.int32))
     lowered = [(c["title"] + " " + c["text"]).lower() for c in chunks]
     embedder = get_embedder(model_name) if mat is not None else None
     kw_count = 0
@@ -3825,37 +3839,51 @@ def load_search(settings, scope):
             "chunks": chunks, "mat": mat, "lowered": lowered, "embedder": embedder,
             "model_name": model_name, "lang": lang,
             "names": ", ".join(channel_label(c) for c in scope),
+            "row_cid": row_cid, "slug_to_cid": slug_to_cid,
+            "channels_meta": [{"slug": c["slug"], "name": full_name(c),
+                               "kind": "keyword" if c.get("search") == "keyword" else "meaning"}
+                              for c in scope],
             "total_moments": len(chunks) + kw_count}
 
 
-def retrieve(ctx, q):
+def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6):
     """Find the candidate moments for a question: decompose it into angles, union the semantic and
-    keyword retrieval (keeping each chunk's best score), then diversify (<=6 per video, up to
-    CAND_MAX). Returns (candidates, queries). Pure data; used by the CLI and the web server."""
+    keyword retrieval (keeping each chunk's best score), then diversify (<=per_vid per video, up to
+    cand_max). `channels` (a list of slugs) limits the search to those channels; None/empty = all.
+    Pure data; used by the CLI and the web server."""
     import numpy as np
+    cand_max = cand_max or CAND_MAX
     anth, settings = ctx["anth"], ctx["settings"]
     mat, chunks, lowered, embedder = ctx["mat"], ctx["chunks"], ctx["lowered"], ctx["embedder"]
     model_name = ctx["model_name"]
+    sel = set(channels) if channels else None  # selected channel slugs, or None for all
+    sel_ids = [cid for s, cid in ctx["slug_to_cid"].items() if s in sel] if sel else None
     queries = _decompose(anth, settings["tag_model"], q)  # the question broken into several search angles
     sem_hits = []
     if mat is not None:
         wterms = [w for w in re.findall(r"\w{4,}", q.lower()) if w not in STOP]
+        row_mask = np.isin(ctx["row_cid"], sel_ids) if sel_ids is not None else None
         best = {}
         for sq in queries:
             qv = np.array(list(embedder.query_embed([query_text(model_name, sq)]))[0], dtype=np.float32)
             qv /= np.linalg.norm(qv) + 1e-9
             scores = mat @ qv
+            if row_mask is not None:
+                scores = np.where(row_mask, scores, -1e9)  # drop deselected channels
             for i in np.argsort(-scores)[:800]:
+                if scores[int(i)] <= -1e8:
+                    break  # only deselected rows remain
                 sc = float(scores[int(i)]) + min(0.12, 0.03 * sum(1 for t in wterms if t in lowered[int(i)]))
                 if sc > best.get(int(i), -2.0):
                     best[int(i)] = sc
         sem_hits = [chunks[i] for i, _ in sorted(best.items(), key=lambda kv: -kv[1])]
     kw_hits = []
-    if ctx["kw_scope"]:
+    kw_scope = [ch for ch in ctx["kw_scope"] if not sel or ch["slug"] in sel]
+    if kw_scope:
         terms = keyword_terms(anth, settings["tag_model"], q) + queries
-        per = max(40, 160 // len(ctx["kw_scope"]))
+        per = max(40, 160 // len(kw_scope))
         lists = []
-        for ch in ctx["kw_scope"]:
+        for ch in kw_scope:
             hits = kw_search(ch, terms, per)
             nm = full_name(ch)  # current display name, so a rename shows without re-indexing
             for h in hits:
@@ -3867,18 +3895,18 @@ def retrieve(ctx, q):
     streams = [x for x in (sem_hits, kw_hits) if x]
     candidates, per_video, seen = [], {}, set()
     idx = [0] * len(streams)
-    while len(candidates) < CAND_MAX and any(idx[j] < len(streams[j]) for j in range(len(streams))):
+    while len(candidates) < cand_max and any(idx[j] < len(streams[j]) for j in range(len(streams))):
         for j, st in enumerate(streams):
             while idx[j] < len(st):
                 c = st[idx[j]]
                 idx[j] += 1
-                if c["chunk_id"] in seen or per_video.get(c["video_id"], 0) >= 6:
+                if c["chunk_id"] in seen or per_video.get(c["video_id"], 0) >= per_vid:
                     continue
                 seen.add(c["chunk_id"])
                 per_video[c["video_id"]] = per_video.get(c["video_id"], 0) + 1
                 candidates.append(c)
                 break
-            if len(candidates) >= CAND_MAX:
+            if len(candidates) >= cand_max:
                 break
     return candidates, queries
 
@@ -3895,10 +3923,12 @@ def synthesize(ctx, q, candidates):
                          "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}}
 
 
-def answer_question(ctx, q):
+def answer_question(ctx, q, channels=None, mode=None):
     """Retrieve + synthesize in one call: the whole deluxe answer as plain data (empty=True if nothing
-    matched). No printing or file I/O - the CLI and the web server format and persist it themselves."""
-    candidates, queries = retrieve(ctx, q)
+    matched). `channels` (slugs) limits the search; `mode` (quick/standard/deep) sets the depth.
+    No printing or file I/O - the CLI and the web server format and persist it themselves."""
+    m = MODES.get(mode or DEFAULT_MODE, MODES[DEFAULT_MODE])
+    candidates, queries = retrieve(ctx, q, channels=channels, cand_max=m["cand_max"], per_vid=m["per_video"])
     if not candidates:
         return {"q": q, "empty": True, "answer": None, "candidates": [], "cited": [], "queries": queries,
                 "coverage": {"moments": 0, "videos": 0, "channels": 0}, "usd": 0.0}

@@ -20,6 +20,8 @@ type Answer = {
   cost_usd?: number;
   error?: string;
 };
+type Channel = { slug: string; name: string; kind: string };
+type Mode = { id: string; label: string; usd: number };
 
 // Typical cost of one deluxe answer, shown up front so nobody is surprised by the bill.
 const TYPICAL_COST = 0.08;
@@ -127,6 +129,106 @@ function Gate({ onOk }: { onOk: () => void }) {
   );
 }
 
+// Depth selector: Quick / Standard / Deep, each with its own typical cost.
+function ModePicker({ modes, mode, onChange }: { modes: Mode[]; mode: string; onChange: (id: string) => void }) {
+  if (!modes.length) return null;
+  return (
+    <div className="inline-flex rounded-xl border border-line bg-raised/70 p-0.5">
+      {modes.map((m) => (
+        <button
+          key={m.id}
+          type="button"
+          onClick={() => onChange(m.id)}
+          title={`${m.label} — about ${aed(m.usd)} per answer`}
+          className={`rounded-[9px] px-3 py-1.5 text-[13px] font-medium transition ${
+            mode === m.id ? "bg-accent text-paper shadow-sm" : "text-muted hover:text-ink"
+          }`}
+        >
+          {m.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+// Which channels to search. Defaults to all; a subset narrows the search (and the cost).
+function ChannelPicker({
+  channels,
+  selected,
+  onChange,
+}: {
+  channels: Channel[];
+  selected: Set<string>;
+  onChange: (next: Set<string>) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const all = selected.size === channels.length;
+  const label = all ? "All channels" : selected.size === 0 ? "No channels" : `${selected.size} of ${channels.length}`;
+
+  useEffect(() => {
+    if (!open) return;
+    function onDoc(e: MouseEvent) {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    }
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  function toggle(slug: string) {
+    const next = new Set(selected);
+    if (next.has(slug)) next.delete(slug);
+    else next.add(slug);
+    onChange(next);
+  }
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex items-center gap-1.5 rounded-xl border border-line bg-raised/70 px-3 py-1.5 text-[13px] font-medium text-ink transition hover:border-line2"
+      >
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden className="text-muted">
+          <path d="M4 7h16M7 12h10M10 17h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+        {label}
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden className="text-faint">
+          <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute left-0 z-30 mt-1.5 max-h-80 w-72 overflow-auto rounded-xl border border-line bg-raised p-1.5 shadow-[0_16px_40px_-16px_rgba(35,33,27,0.4)]">
+          <div className="flex items-center justify-between px-2 py-1 text-xs">
+            <button type="button" className="font-medium text-accent hover:underline" onClick={() => onChange(new Set(channels.map((c) => c.slug)))}>
+              Select all
+            </button>
+            <button type="button" className="text-muted hover:text-ink" onClick={() => onChange(new Set())}>
+              Clear
+            </button>
+          </div>
+          {channels.map((c) => (
+            <label
+              key={c.slug}
+              className="flex cursor-pointer items-center gap-2.5 rounded-lg px-2 py-1.5 hover:bg-paper"
+            >
+              <input
+                type="checkbox"
+                checked={selected.has(c.slug)}
+                onChange={() => toggle(c.slug)}
+                className="h-4 w-4 shrink-0 accent-[var(--color-accent)]"
+              />
+              <span className="min-w-0 flex-1 truncate text-sm text-ink" dir="auto">
+                {c.name}
+              </span>
+            </label>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Home() {
   const [q, setQ] = useState("");
   const [asked, setAsked] = useState<string | null>(null);
@@ -136,6 +238,10 @@ export default function Home() {
   const [stage, setStage] = useState(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const [authed, setAuthed] = useState<boolean | null>(null);
+  const [channels, setChannels] = useState<Channel[]>([]);
+  const [modes, setModes] = useState<Mode[]>([]);
+  const [selected, setSelected] = useState<Set<string>>(new Set());
+  const [mode, setMode] = useState("standard");
 
   // check whether this visitor is through the invite gate
   useEffect(() => {
@@ -144,6 +250,21 @@ export default function Home() {
       .then((d) => setAuthed(!!d.authed))
       .catch(() => setAuthed(false));
   }, []);
+
+  // load the channel list + depth modes for the pickers, once through the gate
+  useEffect(() => {
+    if (!authed) return;
+    fetch("/api/channels")
+      .then((r) => r.json())
+      .then((d) => {
+        const chs: Channel[] = Array.isArray(d.channels) ? d.channels : [];
+        setChannels(chs);
+        setSelected(new Set(chs.map((c) => c.slug)));
+        if (Array.isArray(d.modes) && d.modes.length) setModes(d.modes);
+        if (d.default_mode) setMode(d.default_mode);
+      })
+      .catch(() => {});
+  }, [authed]);
 
   // cycle the loading stage copy while we wait (real token streaming comes next)
   useEffect(() => {
@@ -161,10 +282,15 @@ export default function Home() {
     setResult(null);
     setError("");
     try {
+      const useSubset = channels.length > 0 && selected.size > 0 && selected.size < channels.length;
       const r = await fetch("/api/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ question: text }),
+        body: JSON.stringify({
+          question: text,
+          mode,
+          channels: useSubset ? [...selected] : undefined,
+        }),
       });
       const data: Answer = await r.json();
       if (!r.ok || data.error) {
@@ -194,6 +320,9 @@ export default function Home() {
   }
 
   const landing = status === "idle";
+  const allSelected = channels.length === 0 || selected.size === channels.length;
+  const noneSelected = channels.length > 0 && selected.size === 0;
+  const modeUsd = modes.find((m) => m.id === mode)?.usd ?? TYPICAL_COST;
 
   if (authed === null) {
     return <main className="grid min-h-[70vh] place-items-center text-sm text-faint">Loading…</main>;
@@ -246,7 +375,7 @@ export default function Home() {
             />
             <button
               type="submit"
-              disabled={!q.trim() || status === "loading"}
+              disabled={!q.trim() || status === "loading" || noneSelected}
               aria-label="Ask"
               className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent text-paper transition enabled:hover:bg-accent2 disabled:opacity-30"
             >
@@ -257,14 +386,29 @@ export default function Home() {
           </div>
         </form>
 
-        {/* cost + scope, shown before you send */}
-        {landing && (
-          <p className="fade-up mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-faint">
-            <span className="text-gold2">≈ {aed(TYPICAL_COST)} per answer</span>
-            <span className="text-line2">·</span>
-            <span>drawn from a million+ moments across 19 channels</span>
-          </p>
-        )}
+        {/* channel + depth pickers, and the cost before you send */}
+        <div className="mt-3">
+          {channels.length > 0 && (
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <ChannelPicker channels={channels} selected={selected} onChange={setSelected} />
+              <ModePicker modes={modes} mode={mode} onChange={setMode} />
+            </div>
+          )}
+          {noneSelected ? (
+            <p className="mt-2.5 text-[13px] text-danger">Pick at least one channel to search.</p>
+          ) : (
+            <p className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-faint">
+              <span className="text-gold2">≈ {aed(modeUsd)} per answer</span>
+              <span className="text-line2">·</span>
+              <span>
+                {allSelected
+                  ? `all ${channels.length || 19} channels`
+                  : `${selected.size} channel${selected.size === 1 ? "" : "s"}`}
+                {" · a million+ moments"}
+              </span>
+            </p>
+          )}
+        </div>
 
         {landing && (
           <div className="fade-up mt-7">

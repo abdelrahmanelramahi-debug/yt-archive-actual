@@ -16,16 +16,18 @@ export async function POST(req: NextRequest) {
     }
   }
 
-  let question = "";
+  let body: { question?: string; channels?: string[]; mode?: string } = {};
   try {
-    question = (await req.json())?.question ?? "";
+    body = await req.json();
   } catch {
     /* ignore bad body */
   }
-  question = String(question).trim();
+  const question = String(body?.question ?? "").trim();
   if (!question) {
     return NextResponse.json({ error: "Please type a question." }, { status: 400 });
   }
+  const channels = Array.isArray(body?.channels) ? body.channels : undefined;
+  const mode = typeof body?.mode === "string" ? body.mode : undefined;
 
   // forward the real visitor IP so the brain's per-person limit works (all calls arrive from Vercel)
   const clientIp = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim();
@@ -37,7 +39,7 @@ export async function POST(req: NextRequest) {
         ...(BRAIN_KEY ? { "X-Brain-Key": BRAIN_KEY } : {}),
         ...(clientIp ? { "X-Client-IP": clientIp } : {}),
       },
-      body: JSON.stringify({ question }),
+      body: JSON.stringify({ question, channels, mode }),
     });
     const data = await r.json().catch(() => ({ error: "The brain returned an unexpected response." }));
     return NextResponse.json(data, { status: r.status });

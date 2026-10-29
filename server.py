@@ -129,8 +129,20 @@ def search(q: str = Query(..., min_length=1), k: int = 20, x_brain_key: str = He
     return {"q": q, "results": hits}
 
 
+@app.get("/channels")
+def channels(x_brain_key: str = Header(None)):
+    """The channels available to search (for the website's channel picker) and the depth modes."""
+    _check_key(x_brain_key)
+    ctx = STATE.get("ctx")
+    chans = ctx["channels_meta"] if ctx else []
+    modes = [{"id": k, "label": v["label"], "usd": v["usd"]} for k, v in brain.MODES.items()]
+    return {"channels": chans, "modes": modes, "default_mode": brain.DEFAULT_MODE}
+
+
 class AskRequest(BaseModel):
     question: str
+    channels: list[str] | None = None  # slugs to limit the search to; None/empty = all
+    mode: str | None = None            # quick | standard | deep
 
 
 @app.post("/ask")
@@ -148,7 +160,7 @@ def ask(req: AskRequest, request: Request, x_brain_key: str = Header(None),
     if blocked:
         raise HTTPException(status_code=429, detail=blocked)
     try:
-        res = brain.answer_question(ctx, q)
+        res = brain.answer_question(ctx, q, channels=req.channels, mode=req.mode)
     except Exception as e:
         msg = str(e).lower()
         if "credit" in msg or "billing" in msg:
