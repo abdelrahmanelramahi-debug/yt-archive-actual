@@ -1,0 +1,4 @@
+# Brain service deps = the CLI's deps plus the web server.
+-r requirements.txt
+fastapi
+uvicorn[standard]
