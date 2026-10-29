@@ -32,10 +32,10 @@ export const viewport: Viewport = {
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
-  // Set the theme before paint so there's no flash of the wrong colours.
-  const themeInit = `(function(){try{var c=localStorage.getItem('theme')||'sepia';var t=c==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):c;var e=document.documentElement;e.setAttribute('data-theme',t);e.setAttribute('data-theme-choice',c);}catch(e){document.documentElement.setAttribute('data-theme','sepia');}})();`;
+  // Set the theme before paint so there's no flash of the wrong colours. Default follows the OS.
+  const themeInit = `(function(){try{var c=localStorage.getItem('theme')||'system';var t=c==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):c;var e=document.documentElement;e.setAttribute('data-theme',t);e.setAttribute('data-theme-choice',c);}catch(e){document.documentElement.setAttribute('data-theme','light');}})();`;
   return (
-    <html lang="en" className={`${inter.variable} ${fraunces.variable}`} data-theme="sepia" suppressHydrationWarning>
+    <html lang="en" className={`${inter.variable} ${fraunces.variable}`} data-theme="light" suppressHydrationWarning>
       <body>
         <Script id="theme-init" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: themeInit }} />
         {children}

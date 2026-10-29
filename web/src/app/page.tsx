@@ -100,12 +100,12 @@ function ThemeIcon({ id }: { id: string }) {
 
 // Display selector: Light / Sepia / Dark / System, remembered in localStorage.
 function ThemeSelector() {
-  const [choice, setChoice] = useState("sepia");
+  const [choice, setChoice] = useState("system");
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
-    setChoice(document.documentElement.getAttribute("data-theme-choice") || "sepia");
+    setChoice(document.documentElement.getAttribute("data-theme-choice") || "system");
   }, []);
   useEffect(() => {
     if (!open) return;
