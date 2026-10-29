@@ -57,18 +57,6 @@ function Wordmark() {
   );
 }
 
-// Brass cost pill — persistent, top of page, so the price is clear before anyone asks.
-function CostPill() {
-  return (
-    <span
-      title="Each question runs a full search and a written, cited answer. Cost varies a little with length."
-      className="inline-flex shrink-0 items-center whitespace-nowrap rounded-full border border-gold/45 bg-gold/[0.06] px-2.5 py-1 text-xs font-medium text-gold2"
-    >
-      ≈ {aed(TYPICAL_COST)} per question
-    </span>
-  );
-}
-
 function Gate({ onOk }: { onOk: () => void }) {
   const [code, setCode] = useState("");
   const [err, setErr] = useState("");
@@ -389,15 +377,14 @@ export default function Home() {
   return (
     <main className="mx-auto w-full max-w-3xl px-5 pb-28">
       {/* header: identity + persistent cost */}
-      <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 py-6">
+      <header className="py-6">
         <Wordmark />
-        <CostPill />
       </header>
 
-      {/* hero */}
-      <section className={landing ? "pt-[12vh]" : "pt-5"}>
+      {/* hero + suggestions + ask */}
+      <section className={landing ? "pt-6" : "pt-5"}>
         {landing && (
-          <div className="fade-up mb-9">
+          <div className="fade-up mb-8">
             <h1 className="max-w-2xl text-balance font-serif text-[2.1rem] font-medium leading-[1.12] tracking-tight text-ink sm:text-[2.7rem]">
               Ask across the archive
             </h1>
@@ -412,6 +399,27 @@ export default function Home() {
               <Stat n="1.1M+" label="searchable moments" />
               <span className="hidden h-10 w-px bg-line sm:block" />
               <Stat n={String(channels.length || 19)} label="channels" />
+            </div>
+          </div>
+        )}
+
+        {/* suggestions, above the ask bar on landing */}
+        {landing && (
+          <div className="fade-up mb-4">
+            <p className="mb-2.5 text-xs text-faint">Try one of these</p>
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+              {EXAMPLES.map((ex) => (
+                <button
+                  key={ex}
+                  onClick={() => {
+                    setQ(ex);
+                    ask(ex);
+                  }}
+                  className="rounded-lg border border-line bg-raised/60 px-3.5 py-2 text-left text-[13.5px] text-muted transition hover:border-line2 hover:text-ink"
+                >
+                  {ex}
+                </button>
+              ))}
             </div>
           </div>
         )}
@@ -448,50 +456,29 @@ export default function Home() {
           </div>
         </form>
 
-        {/* channel + depth pickers, and the cost before you send */}
-        <div className="mt-3">
-          {channels.length > 0 && (
-            <div className="flex flex-wrap items-center justify-between gap-2">
+        {/* channel picker + its live scope (left); mode picker + its cost + explainer (right) */}
+        {channels.length > 0 && (
+          <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
+            <div className="flex flex-col items-start gap-1.5">
               <ChannelPicker channels={channels} selected={selected} onChange={setSelected} />
-              <ModePicker modes={modes} mode={mode} onChange={setMode} />
+              {noneSelected ? (
+                <p className="text-[13px] text-danger">Pick at least one channel.</p>
+              ) : (
+                <p className="text-[13px] text-faint">
+                  {allSelected
+                    ? `all ${channels.length || 19} channels`
+                    : `${selected.size} of ${channels.length} channels`}
+                </p>
+              )}
             </div>
-          )}
-          {noneSelected ? (
-            <p className="mt-2.5 text-[13px] text-danger">Pick at least one channel to search.</p>
-          ) : (
-            <p className="mt-2.5 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-faint">
-              <span className="text-gold2">≈ {aed(modeUsd)} per answer</span>
-              <span className="text-line2">·</span>
-              <span>
-                {allSelected
-                  ? `all ${channels.length || 19} channels`
-                  : `${selected.size} channel${selected.size === 1 ? "" : "s"}`}
-                {" · a million+ moments"}
-              </span>
-            </p>
-          )}
-          <ModeExplainer modes={modes} />
-        </div>
-
-        {landing && (
-          <div className="fade-up mt-7">
-            <p className="mb-2.5 text-xs text-faint">Try one of these</p>
-            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-              {EXAMPLES.map((ex) => (
-                <button
-                  key={ex}
-                  onClick={() => {
-                    setQ(ex);
-                    ask(ex);
-                  }}
-                  className="rounded-lg border border-line bg-raised/60 px-3.5 py-2 text-left text-[13.5px] text-muted transition hover:border-line2 hover:text-ink"
-                >
-                  {ex}
-                </button>
-              ))}
+            <div className="flex flex-col items-start gap-1.5 sm:items-end">
+              <ModePicker modes={modes} mode={mode} onChange={setMode} />
+              <p className="text-[13px] text-gold2">≈ {aed(modeUsd)} per answer</p>
+              <ModeExplainer modes={modes} />
             </div>
           </div>
         )}
+
       </section>
 
       {/* conversation area */}
