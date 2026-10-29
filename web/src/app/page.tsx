@@ -229,6 +229,61 @@ function ChannelPicker({
   );
 }
 
+// A single headline figure, for the scale strip on the landing page.
+function Stat({ n, label }: { n: string; label: string }) {
+  return (
+    <div>
+      <div className="font-serif text-[1.8rem] font-medium leading-none tracking-tight text-ink">{n}</div>
+      <div className="mt-1.5 text-xs text-faint">{label}</div>
+    </div>
+  );
+}
+
+// Collapsible explainer for the depth modes, under the picker.
+function ModeExplainer({ modes }: { modes: Mode[] }) {
+  const [open, setOpen] = useState(false);
+  if (!modes.length) return null;
+  const keeps: Record<string, string> = { quick: "~120", standard: "~500", deep: "~1,000" };
+  const when: Record<string, string> = {
+    quick: "a fast gist",
+    standard: "most questions",
+    deep: "broad or contested topics",
+  };
+  return (
+    <div className="mt-2">
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex items-center gap-1.5 text-xs text-muted transition hover:text-ink"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+          <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.6" />
+          <path d="M12 11v5M12 8h.01" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+        </svg>
+        How the depths differ
+      </button>
+      {open && (
+        <div className="fade-up mt-2 max-w-md rounded-xl border border-line bg-raised/60 p-3.5 text-[13px] leading-relaxed">
+          <p className="text-ink">
+            Every depth searches <strong className="font-semibold">all 1.1M moments</strong> — it only changes how
+            many of the best it keeps, so the obscure finds surface either way.
+          </p>
+          <div className="mt-2.5 space-y-1.5">
+            {modes.map((m) => (
+              <div key={m.id} className="flex items-baseline gap-2">
+                <span className="w-[4.5rem] shrink-0 font-medium text-ink">{m.label}</span>
+                <span className="text-muted">
+                  keeps <span className="text-gold2">{keeps[m.id] ?? "?"}</span> · ≈ {aed(m.usd)} · {when[m.id] ?? ""}
+                </span>
+              </div>
+            ))}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 export default function Home() {
   const [q, setQ] = useState("");
   const [asked, setAsked] = useState<string | null>(null);
@@ -351,6 +406,13 @@ export default function Home() {
               lectures and debates and traced to the exact moment they were said, with a timestamp
               you can open on the video.
             </p>
+            <div className="mt-7 flex flex-wrap items-center gap-x-7 gap-y-4 sm:gap-x-10">
+              <Stat n="20,000+" label="videos" />
+              <span className="hidden h-10 w-px bg-line sm:block" />
+              <Stat n="1.1M+" label="searchable moments" />
+              <span className="hidden h-10 w-px bg-line sm:block" />
+              <Stat n={String(channels.length || 19)} label="channels" />
+            </div>
           </div>
         )}
 
@@ -408,6 +470,7 @@ export default function Home() {
               </span>
             </p>
           )}
+          <ModeExplainer modes={modes} />
         </div>
 
         {landing && (
