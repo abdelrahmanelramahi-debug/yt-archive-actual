@@ -483,6 +483,7 @@ export default function Home() {
   const [status, setStatus] = useState<"idle" | "loading" | "streaming" | "done" | "error">("idle");
   const [result, setResult] = useState<Answer | null>(null);
   const [streamText, setStreamText] = useState(""); // the answer so far, while it streams
+  const [streamSources, setStreamSources] = useState<Source[]>([]); // evidences, as they stream in
   const [live, setLive] = useState(false); // a stream is in flight (so the stage copy follows events)
   const [error, setError] = useState<string>("");
   const [stage, setStage] = useState(0);
@@ -536,6 +537,7 @@ export default function Home() {
     setStatus("loading");
     setStage(0);
     setStreamText("");
+    setStreamSources([]);
     setResult(null);
     setError("");
     setReturnY(null);
@@ -583,8 +585,9 @@ export default function Home() {
     const dec = new TextDecoder();
     let buf = "";
     let acc = "";
+    const srcs: Source[] = []; // evidences accumulate as their citations stream in
     let gotDelta = false;
-    let done: { sources: Source[]; coverage: Coverage; cost_usd?: number } | null = null;
+    let done: { coverage: Coverage; cost_usd?: number } | null = null;
     const EMPTY_COV: Coverage = { moments: 0, videos: 0, channels: 0 };
 
     for (;;) {
@@ -602,7 +605,7 @@ export default function Home() {
           else if (line.startsWith("data:")) data += line.slice(5).trim();
         }
         if (!data) continue;
-        let obj: { stage?: string; text?: string; error?: string; sources?: Source[]; coverage?: Coverage; cost_usd?: number };
+        let obj: { stage?: string; text?: string; error?: string; coverage?: Coverage; cost_usd?: number } & Partial<Source>;
         try {
           obj = JSON.parse(data);
         } catch {
@@ -615,13 +618,16 @@ export default function Home() {
           gotDelta = true;
           acc += obj.text || "";
           setStreamText(acc);
+        } else if (ev === "source") {
+          srcs.push(obj as Source);
+          setStreamSources([...srcs]);
         } else if (ev === "empty") {
           setResult({ q: text, empty: true, answer: null, sources: [], coverage: EMPTY_COV });
           setStatus("done");
           setLive(false);
           return;
         } else if (ev === "done") {
-          done = { sources: obj.sources || [], coverage: obj.coverage || EMPTY_COV, cost_usd: obj.cost_usd };
+          done = { coverage: obj.coverage || EMPTY_COV, cost_usd: obj.cost_usd };
         } else if (ev === "error") {
           if (gotDelta) {
             // answer already started showing — surface the error rather than silently re-running
@@ -635,14 +641,14 @@ export default function Home() {
       }
     }
     if (done) {
-      setResult({ q: text, empty: false, answer: acc, sources: done.sources, coverage: done.coverage, cost_usd: done.cost_usd });
+      setResult({ q: text, empty: false, answer: acc, sources: srcs, coverage: done.coverage, cost_usd: done.cost_usd });
       setStatus("done");
       setLive(false);
       return;
     }
     if (gotDelta) {
-      // stream ended mid-answer: keep what we have, without sources
-      setResult({ q: text, empty: false, answer: acc, sources: [], coverage: EMPTY_COV });
+      // stream ended mid-answer: keep what we have, with whatever evidences arrived
+      setResult({ q: text, empty: false, answer: acc, sources: srcs, coverage: EMPTY_COV });
       setStatus("done");
       setLive(false);
       return;
@@ -820,7 +826,8 @@ export default function Home() {
             <h2 dir="auto" className="min-w-0 font-serif text-[1.4rem] font-medium leading-snug text-ink">
               {asked}
             </h2>
-            {status === "done" && result && !result.empty && result.sources.length > 0 ? (
+            {(status === "done" && result && !result.empty && result.sources.length > 0) ||
+            (status === "streaming" && streamSources.length > 0) ? (
               <button
                 type="button"
                 onClick={() => document.getElementById("sources")?.scrollIntoView({ behavior: "smooth", block: "start" })}
@@ -849,7 +856,7 @@ export default function Home() {
           {status === "loading" && <Loading stage={stage} />}
 
           {status === "streaming" && (
-            <StreamingAnswer text={streamText} question={asked ?? undefined} onCite={scrollToSource} />
+            <StreamingAnswer text={streamText} sources={streamSources} question={asked ?? undefined} onCite={scrollToSource} />
           )}
 
           {status === "error" && (
@@ -892,9 +899,9 @@ function Loading({ stage }: { stage: number }) {
   );
 }
 
-/* The answer as it streams in, with a blinking caret. Sources appear once the stream finishes
-   (AnswerView takes over on "done"). */
-function StreamingAnswer({ text, question, onCite }: { text: string; question?: string; onCite: (n: number) => void }) {
+/* The answer as it streams in, with a blinking caret, and the evidences appearing beneath it as
+   the answer references them. AnswerView takes over (with the cost line) once the stream finishes. */
+function StreamingAnswer({ text, sources, question, onCite }: { text: string; sources: Source[]; question?: string; onCite: (n: number) => void }) {
   return (
     <div className="fade-up mt-6">
       <article className="max-w-[66ch] text-[16px] leading-[1.8] text-ink">
@@ -904,6 +911,22 @@ function StreamingAnswer({ text, question, onCite }: { text: string; question?: 
           aria-hidden
         />
       </article>
+      <SourcesList sources={sources} />
+    </div>
+  );
+}
+
+/* The cited evidences. Each streams in as the answer first references it. */
+function SourcesList({ sources }: { sources: Source[] }) {
+  if (!sources.length) return null;
+  return (
+    <div id="sources" className="mt-7">
+      <h3 className="mb-3 font-serif text-sm font-medium text-muted">Sources</h3>
+      <div className="space-y-2">
+        {sources.map((s) => (
+          <SourceCard key={s.n} s={s} />
+        ))}
+      </div>
     </div>
   );
 }
@@ -940,23 +963,14 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) =>
         </span>
       </div>
 
-      {result.sources.length > 0 && (
-        <div id="sources" className="mt-7">
-          <h3 className="mb-3 font-serif text-sm font-medium text-muted">Sources</h3>
-          <div className="space-y-2">
-            {result.sources.map((s) => (
-              <SourceCard key={s.n} s={s} />
-            ))}
-          </div>
-        </div>
-      )}
+      <SourcesList sources={result.sources} />
     </div>
   );
 }
 
-/* A cited source. The title, timestamp and 3-line peek link out to the moment on YouTube (as
-   does the arrow icon); the separate "Read transcript" control opens the surrounding transcript
-   in a scrollable panel with the cited line centred (cited line in full contrast, neighbours greyed). */
+/* A cited source. The title + timestamp (and the arrow icon) link out to the moment on YouTube;
+   clicking the 3-line transcript peek opens the surrounding transcript in a scrollable panel with
+   the cited line centred (cited line in full contrast, neighbours greyed). */
 function SourceCard({ s }: { s: Source }) {
   const [open, setOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
@@ -987,6 +1001,7 @@ function SourceCard({ s }: { s: Source }) {
           {s.n}
         </span>
         <div className="min-w-0 flex-1">
+          {/* only the title + timestamp link out to the video */}
           <a href={s.url} target="_blank" rel="noopener noreferrer" className="group block">
             <span className="line-clamp-2 text-sm text-ink group-hover:underline" dir="auto">
               {s.title}
@@ -996,30 +1011,37 @@ function SourceCard({ s }: { s: Source }) {
               {s.channel ? ` · ${s.channel}` : ""}
               {s.date ? ` · ${s.date}` : ""}
             </span>
-            {cited && !open && (
-              <span className="mt-2 block text-[13px] leading-snug" dir="auto">
-                {prev && <span className="block truncate text-faint/60">{prev.text}</span>}
-                <span className="block line-clamp-2 text-ink">{cited.text}</span>
-                {next && <span className="block truncate text-faint/60">{next.text}</span>}
-              </span>
-            )}
           </a>
-          {ctx.length > 1 && (
+          {/* the preview opens the transcript (it does not go to the video) */}
+          {ctx.length > 1 ? (
             <button
               type="button"
               onClick={() => setOpen((o) => !o)}
               aria-expanded={open}
-              className="mt-1.5 flex items-center gap-1 text-[11px] font-medium text-faint transition hover:text-ink"
+              className="group/tr -mx-1 mt-1.5 block w-full rounded-md px-1 py-0.5 text-left transition hover:bg-line/20"
             >
-              <svg
-                width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden
-                className={`transition-transform ${open ? "rotate-180" : ""}`}
-              >
-                <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-              {open ? "Hide transcript" : "Read transcript"}
+              {!open && cited && (
+                <span className="block text-[13px] leading-snug" dir="auto">
+                  {prev && <span className="block truncate text-faint/60">{prev.text}</span>}
+                  <span className="block line-clamp-2 text-ink">{cited.text}</span>
+                  {next && <span className="block truncate text-faint/60">{next.text}</span>}
+                </span>
+              )}
+              <span className="mt-1 flex items-center gap-1 text-[11px] font-medium text-faint transition group-hover/tr:text-ink">
+                <svg
+                  width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden
+                  className={`transition-transform ${open ? "rotate-180" : ""}`}
+                >
+                  <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+                {open ? "Hide transcript" : "Read transcript"}
+              </span>
             </button>
-          )}
+          ) : cited ? (
+            <span className="mt-2 block text-[13px] leading-snug text-ink" dir="auto">
+              {cited.text}
+            </span>
+          ) : null}
         </div>
         <a
           href={s.url}

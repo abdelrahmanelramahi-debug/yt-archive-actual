@@ -87,17 +87,9 @@ def _ctx():
 
 
 def _sources(ctx, candidates, cited):
-    """The cited moments as plain JSON the frontend can render as source cards. Each carries a
-    short window of the surrounding transcript (`context` + `citedIdx`) for the 3-line preview
-    and the expand-to-scroll view."""
-    out = []
-    for n in cited:
-        c = candidates[n - 1]
-        lines, ci = brain.transcript_context(ctx, c)
-        out.append({"n": n, "timestamp": c["timestamp"], "title": c["title"],
-                    "channel": c.get("channel"), "date": c.get("date"), "url": c["url"],
-                    "context": lines, "citedIdx": ci})
-    return out
+    """The cited moments as plain JSON the frontend can render as source cards (each with a short
+    transcript window). The one-shot /ask returns them all at once; the stream sends them one by one."""
+    return [brain.source_json(ctx, candidates[n - 1], n) for n in cited]
 
 
 @app.get("/health")
@@ -186,12 +178,13 @@ def ask_stream(req: AskRequest, request: Request, x_brain_key: str = Header(None
                     yield _sse("status", {"stage": payload})
                 elif kind == "delta":
                     yield _sse("delta", {"text": payload})
+                elif kind == "source":  # one cited moment, streamed in as the answer references it
+                    yield _sse("source", payload)
                 elif kind == "empty":
                     yield _sse("empty", {})
                 elif kind == "done":
                     brain.add_spend("claude", payload["usd"], "web question")
-                    yield _sse("done", {"sources": _sources(ctx, payload["candidates"], payload["cited"]),
-                                        "coverage": payload["coverage"], "cost_usd": round(payload["usd"], 4)})
+                    yield _sse("done", {"coverage": payload["coverage"], "cost_usd": round(payload["usd"], 4)})
         except Exception as e:
             msg = str(e).lower()
             detail = ("Claude credit is used up" if "credit" in msg or "billing" in msg

@@ -4029,16 +4029,30 @@ def answer_question_stream(ctx, q, channels=None, mode=None):
     findings, map_cost = _map_findings(ctx["anth"], ctx["settings"], q, candidates)
     yield ("status", "writing")
     prompt = REDUCE_PROMPT.format(channels=ctx["names"], language=ctx["lang"], question=q, findings=findings)
-    answer, reduce_cost = "", 0.0
+    answer, reduce_cost, emitted = "", 0.0, set()
+    cite_re = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
+
+    def new_sources(text):
+        # emit each cited moment's source card the moment its citation first appears (in order),
+        # so the evidences stream in alongside the answer instead of all landing at the end
+        for grp in cite_re.findall(text):
+            for x in re.findall(r"\d+", grp):
+                n = int(x)
+                if 0 < n <= len(candidates) and n not in emitted:
+                    emitted.add(n)
+                    yield ("source", source_json(ctx, candidates[n - 1], n))
+
     for kind, payload in call_claude_stream(ctx["anth"], ctx["settings"]["answer_model"], prompt, 7000):
         if kind == "delta":
             yield ("delta", payload)
+            answer += payload
+            if "]" in payload:  # a citation may have just closed
+                yield from new_sources(answer)
         else:  # ('done', (full_text, usd))
             answer, reduce_cost = payload
-    cited = sorted({int(n) for grp in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", answer)
-                    for n in re.findall(r"\d+", grp) if 0 < int(n) <= len(candidates)})
-    cov_c = len({candidates[n - 1].get("channel") for n in cited}) or len(ctx["scope"])
-    yield ("done", {"answer": answer, "usd": map_cost + reduce_cost, "cited": cited, "candidates": candidates,
+    yield from new_sources(answer)  # final sweep for any citation the stream closed at the very end
+    cov_c = len({candidates[n - 1].get("channel") for n in sorted(emitted)}) or len(ctx["scope"])
+    yield ("done", {"usd": map_cost + reduce_cost,
                     "coverage": {"moments": len(candidates),
                                  "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}})
 
@@ -4085,6 +4099,15 @@ def transcript_context(ctx, chunk, before=4, after=4):
             cited_idx = len(lines)
         lines.append({"ts": c.get("timestamp"), "text": c.get("text", "")})
     return (lines, cited_idx) if lines else (one, 0)
+
+
+def source_json(ctx, chunk, n):
+    """One cited moment as plain JSON for the website's source card: its metadata plus a short
+    window of surrounding transcript (`context` + `citedIdx`). Shared by /ask and the stream."""
+    lines, ci = transcript_context(ctx, chunk)
+    return {"n": n, "timestamp": chunk["timestamp"], "title": chunk["title"],
+            "channel": chunk.get("channel"), "date": chunk.get("date"), "url": chunk["url"],
+            "context": lines, "citedIdx": ci}
 
 
 def ask(settings):
