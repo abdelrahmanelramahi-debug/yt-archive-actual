@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { createHash } from "crypto";
+import { uidFromAuthHeader, consumeDaily, DAILY_CAP } from "../../../../lib/firebase-admin";
 
 // Streams the brain's Server-Sent Events straight through to the browser. Runs server-side only,
 // so the brain URL + key never reach the client. The page falls back to /api/ask on any failure.
@@ -8,17 +8,11 @@ import { createHash } from "crypto";
 
 const BRAIN_URL = process.env.BRAIN_URL || "http://127.0.0.1:8000";
 const BRAIN_KEY = process.env.BRAIN_KEY || "";
-const ACCESS_CODE = process.env.ACCESS_CODE || "";
-const gateToken = () => createHash("sha256").update(ACCESS_CODE).digest("hex");
 
 export async function POST(req: NextRequest) {
-  // same invite gate as /api/ask
-  if (ACCESS_CODE) {
-    const c = req.cookies.get("gate")?.value;
-    if (!c || c !== gateToken()) {
-      return NextResponse.json({ error: "Please enter your access code first." }, { status: 401 });
-    }
-  }
+  // only signed-in users, within their daily allowance (same rule as /api/ask)
+  const uid = await uidFromAuthHeader(req.headers.get("authorization"));
+  if (!uid) return NextResponse.json({ error: "Please sign in to ask." }, { status: 401 });
 
   let body: { question?: string; channels?: string[]; mode?: string } = {};
   try {
@@ -32,8 +26,22 @@ export async function POST(req: NextRequest) {
   }
   const channels = Array.isArray(body?.channels) ? body.channels : undefined;
   const mode = typeof body?.mode === "string" ? body.mode : undefined;
-  const clientIp = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim();
 
+  // reserve one of today's free answers before spending on Claude
+  let remaining: number;
+  try {
+    remaining = await consumeDaily(uid);
+  } catch {
+    return NextResponse.json({ error: "Could not check your daily limit — try again." }, { status: 503 });
+  }
+  if (remaining < 0) {
+    return NextResponse.json(
+      { error: `You've used your ${DAILY_CAP} free answers for today. They reset at midnight (UTC).` },
+      { status: 429 }
+    );
+  }
+
+  const clientIp = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim();
   try {
     const r = await fetch(`${BRAIN_URL}/ask/stream`, {
       method: "POST",

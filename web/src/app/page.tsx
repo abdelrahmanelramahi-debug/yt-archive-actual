@@ -1,6 +1,12 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
+import { doc, onSnapshot } from "firebase/firestore";
+import { useAuth, signOutUser, idToken } from "../lib/auth";
+import { db } from "../lib/firebase";
+import SignIn from "./SignIn";
+
+const DAILY_CAP = 20; // free answers per user per day (keep in sync with the server's cap)
 
 type Line = { ts: string | null; text: string };
 type Source = {
@@ -181,66 +187,6 @@ function ThemeSelector() {
         </div>
       )}
     </div>
-  );
-}
-
-function Gate({ onOk }: { onOk: () => void }) {
-  const [code, setCode] = useState("");
-  const [err, setErr] = useState("");
-  const [busy, setBusy] = useState(false);
-
-  async function submit(e: React.FormEvent) {
-    e.preventDefault();
-    if (!code.trim() || busy) return;
-    setBusy(true);
-    setErr("");
-    try {
-      const r = await fetch("/api/login", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ code: code.trim() }),
-      });
-      const d = await r.json();
-      if (r.ok && d.ok) onOk();
-      else setErr(d.error || "That code isn't right.");
-    } catch {
-      setErr("Something went wrong. Try again.");
-    } finally {
-      setBusy(false);
-    }
-  }
-
-  return (
-    <main className="flex min-h-[82vh] items-center justify-center px-5">
-      <div className="fade-up w-full max-w-sm">
-        <div className="mb-7 flex justify-center">
-          <Wordmark />
-        </div>
-        <h1 className="text-center font-serif text-2xl font-medium tracking-tight text-ink">
-          An invitation is required
-        </h1>
-        <p className="mt-2 text-center text-[15px] leading-relaxed text-muted">
-          Enter your access code to open the archive.
-        </p>
-        <form onSubmit={submit} className="mt-6">
-          <input
-            autoFocus
-            value={code}
-            onChange={(e) => setCode(e.target.value)}
-            placeholder="Access code"
-            className="w-full rounded-xl border border-line bg-raised px-4 py-3 text-[16px] text-ink shadow-sm outline-none transition placeholder:text-faint focus:border-accent focus:ring-4 focus:ring-accent/10"
-          />
-          {err && <p className="mt-2 text-sm text-danger">{err}</p>}
-          <button
-            type="submit"
-            disabled={!code.trim() || busy}
-            className="mt-3 w-full rounded-xl bg-accent py-3 text-sm font-medium text-paper transition enabled:hover:bg-accent2 disabled:opacity-40"
-          >
-            {busy ? "Checking…" : "Enter"}
-          </button>
-        </form>
-      </div>
-    </main>
   );
 }
 
@@ -488,24 +434,34 @@ export default function Home() {
   const [error, setError] = useState<string>("");
   const [stage, setStage] = useState(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
-  const [authed, setAuthed] = useState<boolean | null>(null);
+  const { user, loading: authLoading } = useAuth();
+  const [usedToday, setUsedToday] = useState(0);
   const [channels, setChannels] = useState<Channel[]>([]);
   const [modes, setModes] = useState<Mode[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [mode, setMode] = useState("standard");
   const [totals, setTotals] = useState<{ moments: number; videos: number } | null>(null);
 
-  // check whether this visitor is through the invite gate
+  // live daily usage for the signed-in user (the server writes it; the rules let a user read their own)
   useEffect(() => {
-    fetch("/api/me")
-      .then((r) => r.json())
-      .then((d) => setAuthed(!!d.authed))
-      .catch(() => setAuthed(false));
-  }, []);
+    if (!user) {
+      setUsedToday(0);
+      return;
+    }
+    const today = new Date().toISOString().slice(0, 10);
+    return onSnapshot(
+      doc(db, "users", user.uid),
+      (snap) => {
+        const d = snap.data() as { day?: string; count?: number } | undefined;
+        setUsedToday(d && d.day === today ? d.count ?? 0 : 0);
+      },
+      () => setUsedToday(0)
+    );
+  }, [user]);
 
-  // load the channel list + depth modes for the pickers, once through the gate
+  // load the channel list + depth modes for the pickers, once signed in
   useEffect(() => {
-    if (!authed) return;
+    if (!user) return;
     fetch("/api/channels")
       .then((r) => r.json())
       .then((d) => {
@@ -519,7 +475,7 @@ export default function Home() {
         }
       })
       .catch(() => {});
-  }, [authed]);
+  }, [user]);
 
   // cycle the loading stage copy while we wait — only for the non-streaming fallback; when a stream
   // is live the real status events drive the stage instead.
@@ -541,12 +497,19 @@ export default function Home() {
     setResult(null);
     setError("");
     setReturnY(null);
+    const token = await idToken();
+    if (!token) {
+      setError("Please sign in again.");
+      setStatus("error");
+      return;
+    }
+    const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
     const useSubset = channels.length > 0 && selected.size > 0 && selected.size < channels.length;
     const payload = { question: text, mode, channels: useSubset ? [...selected] : undefined };
     // Prefer the streaming answer; fall back to the one-shot endpoint if a stream can't be opened.
     setLive(true);
     try {
-      await streamAnswer(text, payload);
+      await streamAnswer(text, payload, headers);
       return;
     } catch {
       /* stream unavailable — fall through to /api/ask */
@@ -555,7 +518,7 @@ export default function Home() {
     try {
       const r = await fetch("/api/ask", {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers,
         body: JSON.stringify(payload),
       });
       const data: Answer = await r.json();
@@ -574,13 +537,24 @@ export default function Home() {
 
   // Open the SSE stream and drive the UI from its events. Returns once a terminal event (done /
   // empty / handled error) is reached; throws before any answer text shows so ask() can fall back.
-  async function streamAnswer(text: string, payload: object) {
+  async function streamAnswer(text: string, payload: object, headers: HeadersInit) {
     const r = await fetch("/api/ask/stream", {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers,
       body: JSON.stringify(payload),
     });
-    if (!r.ok || !r.body) throw new Error("stream unavailable");
+    if (!r.ok || !r.body) {
+      // 404/405 = the stream route isn't there (old deploy) -> fall back to /api/ask. Anything else
+      // (sign-in, daily cap, brain error) is shown directly, so it isn't retried and double-counted.
+      if (r.status && r.status !== 404 && r.status !== 405) {
+        const data = await r.json().catch(() => ({}));
+        setError((data as { error?: string }).error || "Something went wrong.");
+        setStatus("error");
+        setLive(false);
+        return;
+      }
+      throw new Error("stream unavailable");
+    }
     const reader = r.body.getReader();
     const dec = new TextDecoder();
     let buf = "";
@@ -686,11 +660,11 @@ export default function Home() {
   const noneSelected = channels.length > 0 && selected.size === 0;
   const modeUsd = modes.find((m) => m.id === mode)?.usd ?? TYPICAL_COST;
 
-  if (authed === null) {
+  if (authLoading) {
     return <main className="grid min-h-[70vh] place-items-center text-sm text-faint">Loading…</main>;
   }
-  if (!authed) {
-    return <Gate onOk={() => setAuthed(true)} />;
+  if (!user) {
+    return <SignIn />;
   }
 
   return (
@@ -705,7 +679,23 @@ export default function Home() {
         >
           <Wordmark />
         </button>
-        <ThemeSelector />
+        <div className="flex items-center gap-2.5">
+          <span className="hidden text-xs text-faint sm:inline" title="Free answers left today">
+            {Math.max(0, DAILY_CAP - usedToday)}/{DAILY_CAP} today
+          </span>
+          <ThemeSelector />
+          <button
+            type="button"
+            onClick={() => signOutUser()}
+            aria-label="Sign out"
+            title={`${user.email ?? "Signed in"} — sign out`}
+            className="rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink"
+          >
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M15 12H3m0 0 3.5-3.5M3 12l3.5 3.5M9 7V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2v-2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
       </header>
 
       {/* hero + suggestions + ask (ask block anchored to the bottom of the viewport on landing) */}
