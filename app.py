@@ -1552,6 +1552,19 @@ def call_claude(client, model, prompt, max_tokens):
     return text, claude_cost(model, msg.usage)
 
 
+def call_claude_stream(client, model, prompt, max_tokens):
+    """Like call_claude, but yields the answer as it is generated: ('delta', text) for each chunk,
+    then ('done', (full_text, usd)) once. Lets the website show the answer as it writes."""
+    parts = []
+    with client.messages.stream(model=model, max_tokens=max_tokens,
+                                 messages=[{"role": "user", "content": prompt}]) as stream:
+        for text in stream.text_stream:
+            parts.append(text)
+            yield ("delta", text)
+        final = stream.get_final_message()
+    yield ("done", ("".join(parts), claude_cost(model, final.usage)))
+
+
 TAG_TOOL = {
     "name": "save_tags",
     "description": "Save the index entry for this video.",
@@ -3728,10 +3741,10 @@ def _decompose(anth, model, q):
     return out
 
 
-def _deep_answer(anth, settings, q, candidates, lang, names):
-    """Hierarchical map-reduce: the cheap tag model distills many excerpts in parallel (map), condenses
-    them in a middle layer when there are too many, then the answer model synthesises (reduce) — so one
-    answer can stand on hundreds of moments. Returns (answer_text, usd)."""
+def _map_findings(anth, settings, q, candidates):
+    """The 'map' half of the deep answer: the cheap tag model distills the candidate excerpts into a
+    compact findings block in parallel, condensing in a middle layer when there are too many. Returns
+    (findings_text, usd)."""
     numbered = [f"[{n}] {c.get('channel') or ''} | \"{c['title']}\" ({c['date']}"
                 f"{', live' if c.get('type') == 'live' else ''}) at {c['timestamp']}\n{c['text']}"
                 for n, c in enumerate(candidates, 1)]
@@ -3758,10 +3771,17 @@ def _deep_answer(anth, settings, q, candidates, lang, names):
                 cond = list(ex.map(lambda g: cheap(MIDREDUCE_PROMPT.format(q=q, findings="\n".join(g))), groups))
             lines = [ln for r in cond if r and r.strip() for ln in r.strip().splitlines() if ln.strip()]
         findings = "\n".join(lines) or "NONE"
+    return findings, cost[0]
+
+
+def _deep_answer(anth, settings, q, candidates, lang, names):
+    """Hierarchical map-reduce: _map_findings distills many excerpts (map), then the answer model
+    synthesises the cited answer (reduce) — so one answer can stand on hundreds of moments. Returns
+    (answer_text, usd)."""
+    findings, cost = _map_findings(anth, settings, q, candidates)
     answer, u = call_claude(anth, settings["answer_model"],
                             REDUCE_PROMPT.format(channels=names, language=lang, question=q, findings=findings), 7000)
-    cost[0] += u
-    return answer, cost[0]
+    return answer, cost + u
 
 
 def searchable_channels(settings):
@@ -3941,6 +3961,35 @@ def answer_question(ctx, q, channels=None, mode=None):
                 "coverage": {"moments": 0, "videos": 0, "channels": 0}, "usd": 0.0}
     res = synthesize(ctx, q, candidates)
     return {"q": q, "empty": False, "candidates": candidates, "queries": queries, **res}
+
+
+def answer_question_stream(ctx, q, channels=None, mode=None):
+    """Streaming deluxe answer: a generator of (kind, payload) events for the website's live answer.
+    Yields ('status', stage) as it searches then reads, many ('delta', text) as the answer writes,
+    then one ('done', {...}) with the final answer, candidates and cited numbers - or ('empty', None)
+    when nothing matched. Same retrieval and map-reduce as answer_question; only the final write streams."""
+    m = MODES.get(mode or DEFAULT_MODE, MODES[DEFAULT_MODE])
+    yield ("status", "searching")
+    candidates, _ = retrieve(ctx, q, channels=channels, cand_max=m["cand_max"], per_vid=m["per_video"])
+    if not candidates:
+        yield ("empty", None)
+        return
+    yield ("status", "reading")
+    findings, map_cost = _map_findings(ctx["anth"], ctx["settings"], q, candidates)
+    yield ("status", "writing")
+    prompt = REDUCE_PROMPT.format(channels=ctx["names"], language=ctx["lang"], question=q, findings=findings)
+    answer, reduce_cost = "", 0.0
+    for kind, payload in call_claude_stream(ctx["anth"], ctx["settings"]["answer_model"], prompt, 7000):
+        if kind == "delta":
+            yield ("delta", payload)
+        else:  # ('done', (full_text, usd))
+            answer, reduce_cost = payload
+    cited = sorted({int(n) for grp in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", answer)
+                    for n in re.findall(r"\d+", grp) if 0 < int(n) <= len(candidates)})
+    cov_c = len({candidates[n - 1].get("channel") for n in cited}) or len(ctx["scope"])
+    yield ("done", {"answer": answer, "usd": map_cost + reduce_cost, "cited": cited, "candidates": candidates,
+                    "coverage": {"moments": len(candidates),
+                                 "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}})
 
 
 def transcript_context(ctx, chunk, before=4, after=4):

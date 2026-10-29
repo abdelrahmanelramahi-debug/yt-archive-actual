@@ -60,6 +60,8 @@ const STAGES = [
   "Reading the most relevant ones",
   "Writing a grounded answer",
 ];
+// map the brain's streaming status events onto the stage copy above
+const STAGE_IDX: Record<string, number> = { searching: 1, reading: 2, writing: 3 };
 
 // La Tifti wordmark — the uploaded logo, recoloured per theme via a CSS mask.
 function Wordmark() {
@@ -478,8 +480,10 @@ function ModeExplainer({ modes }: { modes: Mode[] }) {
 export default function Home() {
   const [q, setQ] = useState("");
   const [asked, setAsked] = useState<string | null>(null);
-  const [status, setStatus] = useState<"idle" | "loading" | "done" | "error">("idle");
+  const [status, setStatus] = useState<"idle" | "loading" | "streaming" | "done" | "error">("idle");
   const [result, setResult] = useState<Answer | null>(null);
+  const [streamText, setStreamText] = useState(""); // the answer so far, while it streams
+  const [live, setLive] = useState(false); // a stream is in flight (so the stage copy follows events)
   const [error, setError] = useState<string>("");
   const [stage, setStage] = useState(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
@@ -516,32 +520,41 @@ export default function Home() {
       .catch(() => {});
   }, [authed]);
 
-  // cycle the loading stage copy while we wait (real token streaming comes next)
+  // cycle the loading stage copy while we wait — only for the non-streaming fallback; when a stream
+  // is live the real status events drive the stage instead.
   useEffect(() => {
-    if (status !== "loading") return;
+    if (status !== "loading" || live) return;
     setStage(0);
     const id = setInterval(() => setStage((s) => Math.min(s + 1, STAGES.length - 1)), 2600);
     return () => clearInterval(id);
-  }, [status]);
+  }, [status, live]);
 
   async function ask(question: string) {
     const text = question.trim();
-    if (!text || status === "loading") return;
+    if (!text || status === "loading" || status === "streaming") return;
     setAsked(text);
     setStatus("loading");
+    setStage(0);
+    setStreamText("");
     setResult(null);
     setError("");
     setReturnY(null);
+    const useSubset = channels.length > 0 && selected.size > 0 && selected.size < channels.length;
+    const payload = { question: text, mode, channels: useSubset ? [...selected] : undefined };
+    // Prefer the streaming answer; fall back to the one-shot endpoint if a stream can't be opened.
+    setLive(true);
     try {
-      const useSubset = channels.length > 0 && selected.size > 0 && selected.size < channels.length;
+      await streamAnswer(text, payload);
+      return;
+    } catch {
+      /* stream unavailable — fall through to /api/ask */
+    }
+    setLive(false);
+    try {
       const r = await fetch("/api/ask", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          question: text,
-          mode,
-          channels: useSubset ? [...selected] : undefined,
-        }),
+        body: JSON.stringify(payload),
       });
       const data: Answer = await r.json();
       if (!r.ok || data.error) {
@@ -555,6 +568,86 @@ export default function Home() {
       setError("Could not reach the server.");
       setStatus("error");
     }
+  }
+
+  // Open the SSE stream and drive the UI from its events. Returns once a terminal event (done /
+  // empty / handled error) is reached; throws before any answer text shows so ask() can fall back.
+  async function streamAnswer(text: string, payload: object) {
+    const r = await fetch("/api/ask/stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok || !r.body) throw new Error("stream unavailable");
+    const reader = r.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    let acc = "";
+    let gotDelta = false;
+    let done: { sources: Source[]; coverage: Coverage; cost_usd?: number } | null = null;
+    const EMPTY_COV: Coverage = { moments: 0, videos: 0, channels: 0 };
+
+    for (;;) {
+      const { done: fin, value } = await reader.read();
+      if (fin) break;
+      buf += dec.decode(value, { stream: true });
+      let sep: number;
+      while ((sep = buf.indexOf("\n\n")) >= 0) {
+        const block = buf.slice(0, sep);
+        buf = buf.slice(sep + 2);
+        let ev = "message";
+        let data = "";
+        for (const line of block.split("\n")) {
+          if (line.startsWith("event:")) ev = line.slice(6).trim();
+          else if (line.startsWith("data:")) data += line.slice(5).trim();
+        }
+        if (!data) continue;
+        let obj: { stage?: string; text?: string; error?: string; sources?: Source[]; coverage?: Coverage; cost_usd?: number };
+        try {
+          obj = JSON.parse(data);
+        } catch {
+          continue;
+        }
+        if (ev === "status") {
+          setStage(STAGE_IDX[obj.stage ?? ""] ?? 1);
+        } else if (ev === "delta") {
+          if (!gotDelta) setStatus("streaming");
+          gotDelta = true;
+          acc += obj.text || "";
+          setStreamText(acc);
+        } else if (ev === "empty") {
+          setResult({ q: text, empty: true, answer: null, sources: [], coverage: EMPTY_COV });
+          setStatus("done");
+          setLive(false);
+          return;
+        } else if (ev === "done") {
+          done = { sources: obj.sources || [], coverage: obj.coverage || EMPTY_COV, cost_usd: obj.cost_usd };
+        } else if (ev === "error") {
+          if (gotDelta) {
+            // answer already started showing — surface the error rather than silently re-running
+            setError(obj.error || "Something went wrong.");
+            setStatus("error");
+            setLive(false);
+            return;
+          }
+          throw new Error(obj.error || "stream error");
+        }
+      }
+    }
+    if (done) {
+      setResult({ q: text, empty: false, answer: acc, sources: done.sources, coverage: done.coverage, cost_usd: done.cost_usd });
+      setStatus("done");
+      setLive(false);
+      return;
+    }
+    if (gotDelta) {
+      // stream ended mid-answer: keep what we have, without sources
+      setResult({ q: text, empty: false, answer: acc, sources: [], coverage: EMPTY_COV });
+      setStatus("done");
+      setLive(false);
+      return;
+    }
+    throw new Error("no data"); // nothing arrived — let ask() fall back
   }
 
   function onSubmit(e: React.FormEvent) {
@@ -743,6 +836,10 @@ export default function Home() {
 
           {status === "loading" && <Loading stage={stage} />}
 
+          {status === "streaming" && (
+            <StreamingAnswer text={streamText} question={asked ?? undefined} onCite={scrollToSource} />
+          )}
+
           {status === "error" && (
             <div className="mt-5 rounded-xl border border-danger/25 bg-danger/[0.06] px-4 py-3 text-sm text-danger">
               {error}
@@ -779,6 +876,22 @@ function Loading({ stage }: { stage: number }) {
       <div className="relative h-0.5 w-full overflow-hidden rounded-full bg-line sweep" />
       <p className="mt-4 text-sm text-muted">{STAGES[stage]}…</p>
       <p className="mt-1 text-xs text-faint">A thorough answer takes a few moments.</p>
+    </div>
+  );
+}
+
+/* The answer as it streams in, with a blinking caret. Sources appear once the stream finishes
+   (AnswerView takes over on "done"). */
+function StreamingAnswer({ text, question, onCite }: { text: string; question?: string; onCite: (n: number) => void }) {
+  return (
+    <div className="fade-up mt-6">
+      <article className="max-w-[66ch] text-[16px] leading-[1.8] text-ink">
+        {renderAnswer(stripEchoedQuestion(text, question), onCite)}
+        <span
+          className="ml-0.5 inline-block h-[1.05em] w-[2px] translate-y-[0.18em] animate-pulse bg-accent align-middle"
+          aria-hidden
+        />
+      </article>
     </div>
   );
 }

@@ -12,6 +12,7 @@ Only the frontend should call this. Set BRAIN_KEY in the environment and send it
 (read from .env by app.py), never in the frontend or the browser.
 """
 import hmac
+import json
 import os
 import threading
 import time
@@ -20,6 +21,7 @@ from contextlib import asynccontextmanager
 import numpy as np
 from fastapi import FastAPI, Header, HTTPException, Query, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 
 import app as brain
@@ -156,11 +158,55 @@ class AskRequest(BaseModel):
     mode: str | None = None            # quick | standard | deep
 
 
+def _sse(event, data):
+    """Format one Server-Sent Event. ensure_ascii=False keeps Arabic answers compact."""
+    return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
+
+
+@app.post("/ask/stream")
+def ask_stream(req: AskRequest, request: Request, x_brain_key: str = Header(None),
+               x_client_ip: str = Header(None)):
+    """The deluxe Q&A streamed as Server-Sent Events: 'status' (searching/reading/writing), many
+    'delta' (answer text as it writes), then 'done' (sources + cost) or 'empty'. Same answer as
+    /ask - the frontend falls back to /ask when a stream can't be opened."""
+    _check_key(x_brain_key)
+    ctx = _ctx()
+    q = (req.question or "").strip()
+    if not q:
+        raise HTTPException(status_code=400, detail="empty question")
+    ip = (x_client_ip or (request.client.host if request.client else "") or "unknown").split(",")[0].strip()
+    blocked = _rate_limited(ip)
+    if blocked:
+        raise HTTPException(status_code=429, detail=blocked)
+
+    def gen():
+        try:
+            for kind, payload in brain.answer_question_stream(ctx, q, channels=req.channels, mode=req.mode):
+                if kind == "status":
+                    yield _sse("status", {"stage": payload})
+                elif kind == "delta":
+                    yield _sse("delta", {"text": payload})
+                elif kind == "empty":
+                    yield _sse("empty", {})
+                elif kind == "done":
+                    brain.add_spend("claude", payload["usd"], "web question")
+                    yield _sse("done", {"sources": _sources(ctx, payload["candidates"], payload["cited"]),
+                                        "coverage": payload["coverage"], "cost_usd": round(payload["usd"], 4)})
+        except Exception as e:
+            msg = str(e).lower()
+            detail = ("Claude credit is used up" if "credit" in msg or "billing" in msg
+                      else f"answer failed: {str(e)[:200]}")
+            yield _sse("error", {"error": detail})
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
 @app.post("/ask")
 def ask(req: AskRequest, request: Request, x_brain_key: str = Header(None),
         x_client_ip: str = Header(None)):
-    """The full deluxe Q&A for one question. Returns the cited answer + sources as JSON.
-    (Token-by-token streaming is added in Phase 2.)"""
+    """The full deluxe Q&A for one question. Returns the cited answer + sources as JSON. The website
+    uses /ask/stream for a live answer and falls back to this when a stream can't be opened."""
     _check_key(x_brain_key)
     ctx = _ctx()
     q = (req.question or "").strip()
