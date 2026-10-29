@@ -1033,13 +1033,13 @@ function inline(text: string, key: string, onCite: (n: number) => void) {
     if (cite) {
       const nums = cite[1].split(",").map((x) => parseInt(x.trim(), 10));
       return (
-        <span key={`${key}-${i}`}>
+        <span key={`${key}-${i}`} className="cites">
           {nums.map((n, j) => (
             <span key={j}>
               <sup className="cite" onClick={() => onCite(n)} title={`Jump to source ${n}`}>
                 {n}
               </sup>
-              {j < nums.length - 1 ? <span className="cite-sep"> </span> : ""}
+              {j < nums.length - 1 ? <span className="cite-sep" /> : ""}
             </span>
           ))}
         </span>

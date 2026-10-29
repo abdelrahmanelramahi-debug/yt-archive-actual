@@ -143,6 +143,10 @@ body {
   transition: color 0.15s;
 }
 .cite:hover { color: var(--color-accent); text-decoration: underline; }
+/* A touch of space before a citation group and an even gap between stacked numerals, so a run
+   like "2 4 34 48" reads clearly instead of crowding together. */
+.cites { margin-left: 0.2em; }
+.cite-sep { display: inline-block; width: 0.32em; }
 
 /* Source card flash when a citation jumps to it. */
 .src-hit {
