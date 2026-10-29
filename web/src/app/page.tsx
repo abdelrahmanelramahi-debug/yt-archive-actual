@@ -21,6 +21,13 @@ type Answer = {
   error?: string;
 };
 
+// Typical cost of one deluxe answer, shown up front so nobody is surprised by the bill.
+const TYPICAL_COST = 0.08;
+
+// Prices are shown to visitors in AED (UAE dirham), converted from the USD the brain reports.
+const AED_PER_USD = 3.6725; // fixed USD peg
+const aed = (usd: number) => `AED ${(usd * AED_PER_USD).toFixed(2)}`;
+
 const EXAMPLES = [
   "What are the conditions for a valid wudu?",
   "How do the scholars respond to the trinity?",
@@ -34,6 +41,31 @@ const STAGES = [
   "Reading the most relevant ones",
   "Writing a grounded answer",
 ];
+
+// Pure type wordmark — Latin name beside the Arabic it comes from. No icon: a
+// generic glyph here is the first thing that reads as templated.
+function Wordmark() {
+  return (
+    <div className="flex items-baseline gap-2.5">
+      <span className="font-serif text-[19px] font-medium tracking-tight text-ink">La Tifti</span>
+      <span className="text-[15px] text-faint" dir="rtl" lang="ar">
+        لا تفتي
+      </span>
+    </div>
+  );
+}
+
+// Brass cost pill — persistent, top of page, so the price is clear before anyone asks.
+function CostPill() {
+  return (
+    <span
+      title="Each question runs a full search and a written, cited answer. Cost varies a little with length."
+      className="inline-flex items-center rounded-full border border-gold/45 bg-gold/[0.06] px-2.5 py-1 text-xs font-medium text-gold2"
+    >
+      ≈ {aed(TYPICAL_COST)} per question
+    </span>
+  );
+}
 
 function Gate({ onOk }: { onOk: () => void }) {
   const [code, setCode] = useState("");
@@ -62,32 +94,30 @@ function Gate({ onOk }: { onOk: () => void }) {
   }
 
   return (
-    <main className="flex min-h-[80vh] items-center justify-center px-5">
+    <main className="flex min-h-[82vh] items-center justify-center px-5">
       <div className="fade-up w-full max-w-sm">
-        <div className="mb-6 flex items-center justify-center gap-2.5">
-          <div className="grid h-7 w-7 place-items-center rounded-lg bg-accent/15 text-accent">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <path d="M4 6.5C4 5 5 4 6.5 4H18a2 2 0 0 1 2 2v12.5a1.5 1.5 0 0 1-1.5 1.5H6.5A2.5 2.5 0 0 1 4 17.5V6.5Z" stroke="currentColor" strokeWidth="1.6" />
-              <path d="M8 8.5h7M8 12h7M8 15.5h4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-            </svg>
-          </div>
-          <span className="text-[15px] font-medium text-fg">The Archive</span>
+        <div className="mb-7 flex justify-center">
+          <Wordmark />
         </div>
-        <h1 className="text-center text-lg font-medium text-fg">This archive is invite-only</h1>
-        <p className="mt-1.5 text-center text-sm text-muted">Enter your access code to continue.</p>
-        <form onSubmit={submit} className="mt-5">
+        <h1 className="text-center font-serif text-2xl font-medium tracking-tight text-ink">
+          An invitation is required
+        </h1>
+        <p className="mt-2 text-center text-[15px] leading-relaxed text-muted">
+          Enter your access code to open the archive.
+        </p>
+        <form onSubmit={submit} className="mt-6">
           <input
             autoFocus
             value={code}
             onChange={(e) => setCode(e.target.value)}
             placeholder="Access code"
-            className="w-full rounded-xl border border-line bg-surface px-4 py-3 text-[15px] text-fg outline-none transition placeholder:text-faint focus:border-line2"
+            className="w-full rounded-xl border border-line bg-raised px-4 py-3 text-[15px] text-ink shadow-sm outline-none transition placeholder:text-faint focus:border-accent focus:ring-4 focus:ring-accent/10"
           />
-          {err && <p className="mt-2 text-sm text-[#f0a8b0]">{err}</p>}
+          {err && <p className="mt-2 text-sm text-danger">{err}</p>}
           <button
             type="submit"
             disabled={!code.trim() || busy}
-            className="mt-3 w-full rounded-xl bg-accent py-3 text-sm font-medium text-ink transition enabled:hover:bg-accent2 disabled:opacity-40"
+            className="mt-3 w-full rounded-xl bg-accent py-3 text-sm font-medium text-paper transition enabled:hover:bg-accent2 disabled:opacity-40"
           >
             {busy ? "Checking…" : "Enter"}
           </button>
@@ -174,37 +204,30 @@ export default function Home() {
 
   return (
     <main className="mx-auto w-full max-w-3xl px-5 pb-28">
-      {/* header */}
+      {/* header: identity + persistent cost */}
       <header className="flex items-center justify-between py-6">
-        <div className="flex items-center gap-2.5">
-          <div className="grid h-7 w-7 place-items-center rounded-lg bg-accent/15 text-accent">
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <path d="M4 6.5C4 5 5 4 6.5 4H18a2 2 0 0 1 2 2v12.5a1.5 1.5 0 0 1-1.5 1.5H6.5A2.5 2.5 0 0 1 4 17.5V6.5Z" stroke="currentColor" strokeWidth="1.6" />
-              <path d="M8 8.5h7M8 12h7M8 15.5h4" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-            </svg>
-          </div>
-          <span className="text-[15px] font-medium tracking-tight text-fg">The Archive</span>
-        </div>
-        <span className="text-xs text-faint">grounded in real moments</span>
+        <Wordmark />
+        <CostPill />
       </header>
 
       {/* hero */}
-      <section className={landing ? "pt-[14vh]" : "pt-6"}>
+      <section className={landing ? "pt-[12vh]" : "pt-5"}>
         {landing && (
-          <div className="fade-up mb-8 text-center">
-            <h1 className="text-balance text-3xl font-semibold tracking-tight text-fg sm:text-4xl">
-              Ask across thousands of hours
-              <br className="hidden sm:block" /> of lectures and debates
+          <div className="fade-up mb-9">
+            <h1 className="max-w-2xl text-balance font-serif text-[2.1rem] font-medium leading-[1.12] tracking-tight text-ink sm:text-[2.7rem]">
+              Ask across the archive
             </h1>
-            <p className="mx-auto mt-3 max-w-md text-[15px] leading-relaxed text-muted">
-              Every answer is built from real transcript moments — with timestamps you can open on the video.
+            <p className="mt-4 max-w-xl text-[16px] leading-relaxed text-muted">
+              Not a fatwa — the words of the scholars themselves, drawn from thousands of hours of
+              lectures and debates and traced to the exact moment they were said, with a timestamp
+              you can open on the video.
             </p>
           </div>
         )}
 
         {/* ask bar */}
         <form onSubmit={onSubmit} className="sticky top-3 z-10">
-          <div className="group flex items-end gap-2 rounded-2xl border border-line bg-surface/80 p-2 pl-4 shadow-[0_8px_40px_-12px_rgba(0,0,0,0.6)] backdrop-blur transition-colors focus-within:border-line2">
+          <div className="group flex items-end gap-2 rounded-2xl border border-line bg-raised/90 p-2 pl-4 shadow-[0_2px_8px_rgba(35,33,27,0.04),0_14px_40px_-20px_rgba(35,33,27,0.25)] backdrop-blur transition focus-within:border-accent focus-within:shadow-[0_2px_8px_rgba(15,107,87,0.06),0_14px_40px_-18px_rgba(15,107,87,0.3)]">
             <textarea
               ref={inputRef}
               value={q}
@@ -218,13 +241,13 @@ export default function Home() {
               rows={1}
               dir="auto"
               placeholder="Ask anything…  (English or Arabic)"
-              className="max-h-40 flex-1 resize-none bg-transparent py-2 text-[15px] leading-relaxed text-fg outline-none placeholder:text-faint"
+              className="max-h-40 flex-1 resize-none bg-transparent py-2 text-[15px] leading-relaxed text-ink outline-none placeholder:text-faint"
             />
             <button
               type="submit"
               disabled={!q.trim() || status === "loading"}
               aria-label="Ask"
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent text-ink transition enabled:hover:bg-accent2 disabled:opacity-35"
+              className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent text-paper transition enabled:hover:bg-accent2 disabled:opacity-30"
             >
               <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden>
                 <path d="M12 19V5M12 5l-6 6M12 5l6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
@@ -233,42 +256,52 @@ export default function Home() {
           </div>
         </form>
 
+        {/* cost + scope, shown before you send */}
         {landing && (
-          <div className="fade-up mt-5 flex flex-wrap justify-center gap-2">
-            {EXAMPLES.map((ex) => (
-              <button
-                key={ex}
-                onClick={() => {
-                  setQ(ex);
-                  ask(ex);
-                }}
-                className="rounded-full border border-line bg-surface/50 px-3.5 py-1.5 text-[13px] text-muted transition hover:border-line2 hover:text-fg"
-              >
-                {ex}
-              </button>
-            ))}
+          <p className="fade-up mt-3 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-faint">
+            <span className="text-gold2">≈ {aed(TYPICAL_COST)} per answer</span>
+            <span className="text-line2">·</span>
+            <span>drawn from a million+ moments across 19 channels</span>
+          </p>
+        )}
+
+        {landing && (
+          <div className="fade-up mt-7">
+            <p className="mb-2.5 text-xs text-faint">Try one of these</p>
+            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+              {EXAMPLES.map((ex) => (
+                <button
+                  key={ex}
+                  onClick={() => {
+                    setQ(ex);
+                    ask(ex);
+                  }}
+                  className="rounded-lg border border-line bg-raised/60 px-3.5 py-2 text-left text-[13.5px] text-muted transition hover:border-line2 hover:text-ink"
+                >
+                  {ex}
+                </button>
+              ))}
+            </div>
           </div>
         )}
       </section>
 
       {/* conversation area */}
       {asked && (
-        <section className="mt-8">
-          <h2 dir="auto" className="text-lg font-medium leading-snug text-fg">
+        <section className="mt-9">
+          <h2 dir="auto" className="font-serif text-[1.4rem] font-medium leading-snug text-ink">
             {asked}
           </h2>
 
           {status === "loading" && <Loading stage={stage} />}
 
           {status === "error" && (
-            <div className="mt-5 rounded-xl border border-[#4a2630] bg-[#241619] px-4 py-3 text-sm text-[#f0a8b0]">
+            <div className="mt-5 rounded-xl border border-danger/25 bg-danger/[0.06] px-4 py-3 text-sm text-danger">
               {error}
             </div>
           )}
 
-          {status === "done" && result && (
-            <AnswerView result={result} onCite={scrollToSource} />
-          )}
+          {status === "done" && result && <AnswerView result={result} onCite={scrollToSource} />}
         </section>
       )}
     </main>
@@ -278,23 +311,9 @@ export default function Home() {
 function Loading({ stage }: { stage: number }) {
   return (
     <div className="fade-up mt-6">
-      <div className="flex items-center gap-2.5 text-sm text-muted">
-        <span className="flex gap-1">
-          {[0, 1, 2].map((i) => (
-            <span
-              key={i}
-              className="h-1.5 w-1.5 rounded-full bg-accent"
-              style={{ animation: "pulseDot 1.1s ease-in-out infinite", animationDelay: `${i * 0.15}s` }}
-            />
-          ))}
-        </span>
-        <span>{STAGES[stage]}…</span>
-      </div>
-      <div className="mt-5 space-y-3">
-        {[90, 100, 96, 70].map((w, i) => (
-          <div key={i} className="shimmer h-3.5 rounded" style={{ width: `${w}%` }} />
-        ))}
-      </div>
+      <div className="relative h-0.5 w-full overflow-hidden rounded-full bg-line sweep" />
+      <p className="mt-4 text-sm text-muted">{STAGES[stage]}…</p>
+      <p className="mt-1 text-xs text-faint">A thorough answer takes a few moments.</p>
     </div>
   );
 }
@@ -302,7 +321,7 @@ function Loading({ stage }: { stage: number }) {
 function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) => void }) {
   if (result.empty || !result.answer) {
     return (
-      <div className="mt-5 rounded-xl border border-line bg-surface px-4 py-3 text-sm text-muted">
+      <div className="mt-5 rounded-xl border border-line bg-raised px-4 py-3 text-sm text-muted">
         Nothing matched that one. Try different words, or ask in Arabic.
       </div>
     );
@@ -310,21 +329,30 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) =>
   const cov = result.coverage;
   return (
     <div className="fade-up mt-6">
-      <article className="text-[15px] leading-[1.75] text-fg">
+      <article className="max-w-[66ch] text-[16px] leading-[1.8] text-ink">
         {renderAnswer(result.answer, onCite)}
       </article>
 
-      <div className="mt-5 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-faint">
+      {/* provenance + actual cost (clear, echoing the header pill) */}
+      <div className="mt-7 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line pt-4 text-[13px] text-faint">
+        {typeof result.cost_usd === "number" && (
+          <span className="inline-flex items-center rounded-full border border-gold/45 bg-gold/[0.06] px-2.5 py-1 font-medium text-gold2">
+            This answer cost {aed(result.cost_usd)}
+            <span className="ml-1.5 text-faint">· ${result.cost_usd.toFixed(2)}</span>
+          </span>
+        )}
         <span>
           Drew on {cov.moments.toLocaleString()} moments across {cov.videos.toLocaleString()} videos
-          {result.sources.length ? ` · cited ${result.sources.length} from ${cov.channels} channel${cov.channels === 1 ? "" : "s"}` : ""}.
+          {result.sources.length
+            ? ` · cited ${result.sources.length} from ${cov.channels} channel${cov.channels === 1 ? "" : "s"}`
+            : ""}
+          .
         </span>
-        {typeof result.cost_usd === "number" && <span>· ${result.cost_usd.toFixed(3)}</span>}
       </div>
 
       {result.sources.length > 0 && (
-        <div className="mt-6">
-          <h3 className="mb-3 text-xs font-medium uppercase tracking-wider text-faint">Sources</h3>
+        <div className="mt-7">
+          <h3 className="mb-3 font-serif text-sm font-medium text-muted">Sources</h3>
           <div className="space-y-2">
             {result.sources.map((s) => (
               <a
@@ -333,17 +361,17 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) =>
                 href={s.url}
                 target="_blank"
                 rel="noopener noreferrer"
-                className="flex items-start gap-3 rounded-xl border border-line bg-surface px-3.5 py-3 transition hover:border-line2 hover:bg-surface2"
+                className="flex items-start gap-3.5 rounded-xl border border-line bg-raised px-4 py-3 transition hover:border-line2 hover:shadow-[0_8px_24px_-16px_rgba(35,33,27,0.35)]"
               >
-                <span className="mt-0.5 grid h-6 min-w-6 place-items-center rounded-md bg-accent/15 px-1.5 text-xs font-semibold text-accent2">
+                <span className="mt-0.5 min-w-6 font-serif text-[15px] font-semibold tabular-nums text-gold">
                   {s.n}
                 </span>
                 <span className="min-w-0 flex-1">
-                  <span className="line-clamp-2 text-sm text-fg" dir="auto">
+                  <span className="line-clamp-2 text-sm text-ink" dir="auto">
                     {s.title}
                   </span>
-                  <span className="mt-0.5 block text-xs text-faint">
-                    <span className="text-muted">{s.timestamp}</span>
+                  <span className="mt-1 block text-xs text-faint">
+                    <span className="font-medium text-accent">{s.timestamp}</span>
                     {s.channel ? ` · ${s.channel}` : ""}
                     {s.date ? ` · ${s.date}` : ""}
                   </span>
@@ -360,38 +388,69 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) =>
   );
 }
 
-/* Lightweight renderer: paragraphs, headings, bullets, **bold**, and [n] citation chips. */
+/* Lightweight renderer: paragraphs, headings, bullets, **bold**, and [n] citation chips.
+   Line-based so a "### Heading" is caught even when the model glues it to the next line. */
+const HEADING = /^\s*(#{1,4})\s+(.*)$/;
+const BULLET = /^\s*([-*•]|\d+[.)])\s+/;
+
 function renderAnswer(text: string, onCite: (n: number) => void) {
-  const blocks = text.split(/\n{2,}/).filter((b) => b.trim());
-  return blocks.map((block, bi) => {
-    const lines = block.split("\n");
-    const isList = lines.every((l) => /^\s*([-*•]|\d+[.)])\s+/.test(l));
-    if (isList) {
-      return (
-        <ul key={bi} className="my-3 space-y-1.5 pl-1">
-          {lines.map((l, li) => (
+  const lines = text.split("\n");
+  const out: React.ReactNode[] = [];
+  let i = 0;
+  let key = 0;
+
+  while (i < lines.length) {
+    const line = lines[i];
+    if (!line.trim()) {
+      i++;
+      continue;
+    }
+
+    const h = line.match(HEADING);
+    if (h) {
+      out.push(
+        <h3 key={key++} dir="auto" className="mb-2 mt-6 font-serif text-[1.15rem] font-medium text-ink">
+          {inline(h[2], `h-${key}`, onCite)}
+        </h3>
+      );
+      i++;
+      continue;
+    }
+
+    if (BULLET.test(line)) {
+      const items: string[] = [];
+      while (i < lines.length && BULLET.test(lines[i])) {
+        items.push(lines[i].replace(BULLET, ""));
+        i++;
+      }
+      const k = key++;
+      out.push(
+        <ul key={k} className="my-3 space-y-1.5 pl-1">
+          {items.map((it, li) => (
             <li key={li} dir="auto" className="flex gap-2.5">
-              <span className="mt-2 h-1 w-1 shrink-0 rounded-full bg-accent2/70" />
-              <span>{inline(l.replace(/^\s*([-*•]|\d+[.)])\s+/, ""), `${bi}-${li}`, onCite)}</span>
+              <span className="mt-[0.7em] h-1 w-1 shrink-0 rounded-full bg-gold" />
+              <span>{inline(it, `${k}-${li}`, onCite)}</span>
             </li>
           ))}
         </ul>
       );
+      continue;
     }
-    const heading = block.match(/^(#{1,4})\s+(.*)$/);
-    if (heading) {
-      return (
-        <h3 key={bi} dir="auto" className="mb-2 mt-5 text-base font-semibold text-fg">
-          {inline(heading[2], `h-${bi}`, onCite)}
-        </h3>
-      );
+
+    // gather a paragraph: consecutive lines that aren't blank, headings, or bullets
+    const para: string[] = [];
+    while (i < lines.length && lines[i].trim() && !HEADING.test(lines[i]) && !BULLET.test(lines[i])) {
+      para.push(lines[i]);
+      i++;
     }
-    return (
-      <p key={bi} dir="auto" className="my-3">
-        {inline(block.replace(/\n/g, " "), `p-${bi}`, onCite)}
+    out.push(
+      <p key={key++} dir="auto" className="my-3.5">
+        {inline(para.join(" "), `p-${key}`, onCite)}
       </p>
     );
-  });
+  }
+
+  return out;
 }
 
 /* inline: **bold** and [n] / [n, m] citations */
@@ -402,7 +461,7 @@ function inline(text: string, key: string, onCite: (n: number) => void) {
     const bold = p.match(/^\*\*([^*]+)\*\*$/);
     if (bold) {
       return (
-        <strong key={`${key}-${i}`} className="font-semibold text-fg">
+        <strong key={`${key}-${i}`} className="font-semibold text-ink">
           {bold[1]}
         </strong>
       );
@@ -417,7 +476,7 @@ function inline(text: string, key: string, onCite: (n: number) => void) {
               <sup className="cite" onClick={() => onCite(n)} title={`Jump to source ${n}`}>
                 {n}
               </sup>
-              {j < nums.length - 1 ? "" : ""}
+              {j < nums.length - 1 ? <span className="cite-sep"> </span> : ""}
             </span>
           ))}
         </span>

@@ -1,78 +1,87 @@
 @import "tailwindcss";
 
 @theme {
-  --color-ink: #0a0a0c;
-  --color-surface: #141418;
-  --color-surface2: #1b1b21;
-  --color-line: #27272f;
-  --color-line2: #34343e;
-  --color-fg: #eeeef2;
-  --color-muted: #9a9aa6;
-  --color-faint: #6b6b77;
-  --color-accent: #8b7bff;
-  --color-accent2: #a99bff;
+  /* Parchment reading-room palette — warm paper, deep emerald, brass.
+     Deliberately not near-black+accent, and not cream+terracotta. */
+  --color-paper: #f3f1e9;      /* page background (warm parchment) */
+  --color-raised: #fbfaf5;     /* input, source cards (a fresh sheet) */
+  --color-ink: #23211b;        /* primary text (warm near-black) */
+  --color-muted: #6a685e;      /* secondary text */
+  --color-faint: #9b988c;      /* tertiary / meta */
+  --color-line: #e3e0d5;       /* hairline */
+  --color-line2: #d2cebf;      /* stronger hairline / hover */
+  --color-accent: #0f6b57;     /* deep emerald (primary) */
+  --color-accent2: #0b5444;    /* emerald hover/pressed */
+  --color-gold: #9a7736;       /* brass (numerals, cost) */
+  --color-gold2: #7d5f27;      /* brass, darker text */
+  --color-danger: #9e3b2e;     /* error text */
+
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
+  --font-serif: var(--font-fraunces), ui-serif, Georgia, "Times New Roman", serif;
 }
 
 html,
 body {
   padding: 0;
   margin: 0;
-  background: var(--color-ink);
-  color: var(--color-fg);
+  background: var(--color-paper);
+  color: var(--color-ink);
 }
 
 body {
   font-family: var(--font-sans);
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
-  /* subtle premium backdrop */
-  background-image: radial-gradient(60rem 60rem at 50% -20rem, rgba(139, 123, 255, 0.08), transparent 70%);
   min-height: 100dvh;
 }
 
 ::selection {
-  background: rgba(139, 123, 255, 0.3);
+  background: rgba(15, 107, 87, 0.16);
 }
 
-/* thin, techy scrollbar */
+/* quiet, warm scrollbar */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--color-line2) transparent;
 }
 
+/* One orchestrated entrance, used sparingly. */
 @keyframes fadeUp {
   from { opacity: 0; transform: translateY(8px); }
   to { opacity: 1; transform: translateY(0); }
 }
-.fade-up { animation: fadeUp 0.4s ease both; }
+.fade-up { animation: fadeUp 0.5s cubic-bezier(0.2, 0.7, 0.2, 1) both; }
 
-@keyframes shimmer {
-  0% { background-position: -400px 0; }
-  100% { background-position: 400px 0; }
+/* Calm indeterminate progress sweep for the loading state. */
+@keyframes sweep {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(400%); }
 }
-.shimmer {
-  background: linear-gradient(90deg, var(--color-surface) 0%, var(--color-surface2) 50%, var(--color-surface) 100%);
-  background-size: 800px 100%;
-  animation: shimmer 1.4s linear infinite;
+.sweep::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  width: 25%;
+  background: linear-gradient(90deg, transparent, var(--color-accent), transparent);
+  opacity: 0.55;
+  animation: sweep 1.5s ease-in-out infinite;
 }
 
-@keyframes pulseDot {
-  0%, 100% { opacity: 0.3; transform: scale(0.85); }
-  50% { opacity: 1; transform: scale(1); }
-}
-
+/* Citation markers: small brass numerals set as superscripts. */
 .cite {
   cursor: pointer;
-  color: var(--color-accent2);
+  color: var(--color-gold2);
+  font-family: var(--font-sans);
   font-weight: 600;
-  font-size: 0.72em;
+  font-size: 0.66em;
   vertical-align: super;
-  padding: 0 1px;
+  padding: 0 0.5px;
+  transition: color 0.15s;
 }
-.cite:hover { text-decoration: underline; }
+.cite:hover { color: var(--color-accent); text-decoration: underline; }
 
+/* Source card flash when a citation jumps to it. */
 .src-hit {
-  box-shadow: 0 0 0 1px var(--color-accent), 0 0 24px rgba(139, 123, 255, 0.25);
+  box-shadow: 0 0 0 1.5px var(--color-accent), 0 10px 30px -14px rgba(15, 107, 87, 0.5);
   border-color: var(--color-accent) !important;
 }
