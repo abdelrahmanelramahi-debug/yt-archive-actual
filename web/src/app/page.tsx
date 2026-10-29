@@ -46,7 +46,7 @@ const STAGES = [
 // generic glyph here is the first thing that reads as templated.
 function Wordmark() {
   return (
-    <div className="flex items-baseline gap-2.5">
+    <div className="flex shrink-0 items-baseline gap-2.5">
       <span className="font-serif text-[19px] font-medium tracking-tight text-ink">La Tifti</span>
       <span className="text-[15px] text-faint" dir="rtl" lang="ar">
         لا تفتي
@@ -60,7 +60,7 @@ function CostPill() {
   return (
     <span
       title="Each question runs a full search and a written, cited answer. Cost varies a little with length."
-      className="inline-flex items-center rounded-full border border-gold/45 bg-gold/[0.06] px-2.5 py-1 text-xs font-medium text-gold2"
+      className="inline-flex shrink-0 items-center whitespace-nowrap rounded-full border border-gold/45 bg-gold/[0.06] px-2.5 py-1 text-xs font-medium text-gold2"
     >
       ≈ {aed(TYPICAL_COST)} per question
     </span>
@@ -111,7 +111,7 @@ function Gate({ onOk }: { onOk: () => void }) {
             value={code}
             onChange={(e) => setCode(e.target.value)}
             placeholder="Access code"
-            className="w-full rounded-xl border border-line bg-raised px-4 py-3 text-[15px] text-ink shadow-sm outline-none transition placeholder:text-faint focus:border-accent focus:ring-4 focus:ring-accent/10"
+            className="w-full rounded-xl border border-line bg-raised px-4 py-3 text-[16px] text-ink shadow-sm outline-none transition placeholder:text-faint focus:border-accent focus:ring-4 focus:ring-accent/10"
           />
           {err && <p className="mt-2 text-sm text-danger">{err}</p>}
           <button
@@ -205,7 +205,7 @@ export default function Home() {
   return (
     <main className="mx-auto w-full max-w-3xl px-5 pb-28">
       {/* header: identity + persistent cost */}
-      <header className="flex items-center justify-between py-6">
+      <header className="flex flex-wrap items-center justify-between gap-x-3 gap-y-2 py-6">
         <Wordmark />
         <CostPill />
       </header>
@@ -241,7 +241,8 @@ export default function Home() {
               rows={1}
               dir="auto"
               placeholder="Ask anything…  (English or Arabic)"
-              className="max-h-40 flex-1 resize-none bg-transparent py-2 text-[15px] leading-relaxed text-ink outline-none placeholder:text-faint"
+              /* 16px keeps iOS Safari from auto-zooming when the field is focused */
+              className="max-h-40 flex-1 resize-none bg-transparent py-2 text-[16px] leading-relaxed text-ink outline-none placeholder:text-faint"
             />
             <button
               type="submit"
