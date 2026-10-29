@@ -1,0 +1,16 @@
+# Keep the brain image small: code + settings only. Data and local junk stay out.
+.git/
+.venv/
+.models/
+output/
+web/
+__pycache__/
+*.pyc
+*.pyo
+.env
+.env.*
+*.bak
+WEBAPP_PLAN.md
+README.md
+START.bat
+ask.bat
