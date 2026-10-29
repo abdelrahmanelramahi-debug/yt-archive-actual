@@ -4533,16 +4533,88 @@ def first_run_checks(settings):
     return True
 
 
-def publish_data(settings):
-    """Package the search data for the live website into one archive you upload to the data release.
+# Where the website's data lives, so publish can upload it automatically.
+GH_REPO = "abdelrahmanelramahi-debug/yt-archive-actual"
+GH_DATA_TAG = "data-v1"
+GH_ASSET = "archive-data.tar.gz"
+GH_RELEASE_URL = f"https://github.com/{GH_REPO}/releases/tag/{GH_DATA_TAG}"
 
-    The website's brain does not see your computer - it loads one data archive at startup. After you
-    add or update channels, run this, upload the file it makes (replacing the old one), then push
-    settings.json. The brain re-pulls the archive whenever it has changed, so the new channels go
-    live on the next redeploy. Only the files the brain actually serves go in (each channel's search
-    index + chunks), so the upload stays small."""
+
+def _gh_api(method, url, token, data=None, content_type=None, length=None):
+    """One GitHub API call via urllib. Returns parsed JSON ({} for an empty body)."""
+    headers = {"Authorization": f"Bearer {token}", "Accept": "application/vnd.github+json",
+               "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "la-tifti-publish"}
+    if content_type:
+        headers["Content-Type"] = content_type
+    if length is not None:
+        headers["Content-Length"] = str(length)
+    req = urllib.request.Request(url, data=data, method=method, headers=headers)
+    with urllib.request.urlopen(req, timeout=900) as r:
+        body = r.read()
+    return json.loads(body) if body else {}
+
+
+class _ProgressReader:
+    """Streams a file to the upload while printing a percentage, so a big upload does not look stuck."""
+    def __init__(self, path):
+        self.f = open(path, "rb")
+        self.total = os.path.getsize(path)
+        self.sent = 0
+        self._shown = -1
+
+    def read(self, n=-1):
+        chunk = self.f.read(n)
+        self.sent += len(chunk)
+        pct = int(self.sent * 100 / self.total) if self.total else 100
+        if pct != self._shown and pct % 5 == 0:
+            self._shown = pct
+            print(f"\r  uploading {pct}% ", end="", flush=True)
+        return chunk
+
+    def __len__(self):
+        return self.total
+
+    def close(self):
+        self.f.close()
+
+
+def _upload_release_asset(path, token):
+    """Replace the data archive on the release: delete the old asset, upload the new one (same name)."""
+    rel = _gh_api("GET", f"https://api.github.com/repos/{GH_REPO}/releases/tags/{GH_DATA_TAG}", token)
+    rel_id = rel["id"]
+    for a in rel.get("assets", []):
+        if a.get("name") == GH_ASSET:
+            _gh_api("DELETE", f"https://api.github.com/repos/{GH_REPO}/releases/assets/{a['id']}", token)
+    up = _ProgressReader(path)
+    try:
+        url = f"https://uploads.github.com/repos/{GH_REPO}/releases/{rel_id}/assets?name={GH_ASSET}"
+        _gh_api("POST", url, token, data=up, content_type="application/gzip", length=up.total)
+    finally:
+        up.close()
+    print()  # finish the progress line
+
+
+def _git_push_settings():
+    """Commit settings.json + a version bump and push, so Railway redeploys and the brain re-pulls.
+    The version bump guarantees a redeploy even when only the data (not settings) changed."""
+    (ROOT / "deploy").mkdir(exist_ok=True)
+    (ROOT / "deploy" / "data.version").write_text(
+        f"{datetime.now():%Y-%m-%d %H:%M:%S}\n", encoding="utf-8")
+    stamp = datetime.now().strftime("%Y-%m-%d %H:%M")
+    subprocess.run(["git", "add", "settings.json", "deploy/data.version"], cwd=str(ROOT), check=True)
+    subprocess.run(["git", "commit", "-m", f"data: publish {stamp}"], cwd=str(ROOT), check=True)
+    subprocess.run(["git", "push"], cwd=str(ROOT), check=True)
+
+
+def publish_data(settings):
+    """Package the search data and put it live on the website in one go.
+
+    The website's brain does not see your computer - it loads one data archive at startup. This
+    bundles only what the brain serves (each channel's search index + chunks), uploads it to the
+    GitHub data release, and pushes so Railway redeploys and pulls it. With no GITHUB_TOKEN in .env
+    it just builds the file and prints the manual upload steps instead."""
     import tarfile
-    # Same file name as the live release asset, so "replace the file" keeps the download link valid.
+    # Same file name as the live release asset, so replacing it keeps the download link valid.
     out = ROOT / "archive-data.tar.gz"
     added, missing = 0, []
     say("Packaging the website's search data ...")
@@ -4567,17 +4639,40 @@ def publish_data(settings):
     size_mb = out.stat().st_size / 1_000_000
     say("")
     ok(f"Built {out.name}: {added} channel(s), {size_mb:,.0f} MB")
-    say(f"  {out}")
     if missing:
         warn(f"Skipped (no search index yet): {', '.join(missing)}")
+
+    token = os.environ.get("GITHUB_TOKEN")
+    if not token:
+        # No token: build only, show the manual steps.
+        say(f"  {out}")
+        say("")
+        say("To put this live (add GITHUB_TOKEN to .env and I do this for you next time):")
+        say("  1. Open the release, delete the old archive-data.tar.gz, upload this one (same name):")
+        say(f"     {GH_RELEASE_URL}")
+        say("  2. If you ADDED a channel, push settings.json too (GitHub Desktop: commit + push).")
+        say("  3. On Railway, open the brain service and click Redeploy.")
+        return
+
+    # One-command path: upload to the release, then push so the brain redeploys and re-pulls.
     say("")
-    say("To put this live (3 steps):")
-    say("  1. Open your data release and replace the file (keep the same name,")
-    say("     archive-data.tar.gz): edit the release, delete the old one, upload this:")
-    say("     https://github.com/abdelrahmanelramahi-debug/yt-archive-actual/releases/tag/data-v1")
-    say("  2. If you ADDED a channel, push settings.json too (GitHub Desktop: commit + push).")
-    say("  3. On Railway, open the brain service and click Redeploy.")
-    say("     New data is live a couple of minutes later.")
+    try:
+        say(f"Uploading {size_mb:,.0f} MB to GitHub (a few minutes) ...")
+        _upload_release_asset(out, token)
+        ok("Uploaded to the data release.")
+    except Exception as e:
+        err(f"Upload failed: {str(e)[:200]}")
+        warn(f"The archive is built at {out} - you can still upload it by hand:")
+        warn(f"  {GH_RELEASE_URL}")
+        return
+    try:
+        _git_push_settings()
+        ok("Pushed - Railway is redeploying the brain.")
+        say("")
+        ok("Done. Your new data is live a couple of minutes after the redeploy finishes.")
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        warn("Data uploaded, but the automatic push did not run.")
+        warn("Just open GitHub Desktop and push to finish (or the brain won't see new channels).")
 
 
 def menu():
