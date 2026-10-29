@@ -84,11 +84,18 @@ def _ctx():
     return ctx
 
 
-def _sources(candidates, cited):
-    """The cited moments as plain JSON the frontend can render as source cards."""
-    return [{"n": n, "timestamp": candidates[n - 1]["timestamp"], "title": candidates[n - 1]["title"],
-             "channel": candidates[n - 1].get("channel"), "date": candidates[n - 1].get("date"),
-             "url": candidates[n - 1]["url"]} for n in cited]
+def _sources(ctx, candidates, cited):
+    """The cited moments as plain JSON the frontend can render as source cards. Each carries a
+    short window of the surrounding transcript (`context` + `citedIdx`) for the 3-line preview
+    and the expand-to-scroll view."""
+    out = []
+    for n in cited:
+        c = candidates[n - 1]
+        lines, ci = brain.transcript_context(ctx, c)
+        out.append({"n": n, "timestamp": c["timestamp"], "title": c["title"],
+                    "channel": c.get("channel"), "date": c.get("date"), "url": c["url"],
+                    "context": lines, "citedIdx": ci})
+    return out
 
 
 @app.get("/health")
@@ -138,7 +145,9 @@ def channels(x_brain_key: str = Header(None)):
     ctx = STATE.get("ctx")
     chans = ctx["channels_meta"] if ctx else []
     modes = [{"id": k, "label": v["label"], "usd": v["usd"]} for k, v in brain.MODES.items()]
-    return {"channels": chans, "modes": modes, "default_mode": brain.DEFAULT_MODE}
+    return {"channels": chans, "modes": modes, "default_mode": brain.DEFAULT_MODE,
+            "total_moments": ctx["total_moments"] if ctx else 0,
+            "total_videos": ctx.get("total_videos", 0) if ctx else 0}
 
 
 class AskRequest(BaseModel):
@@ -172,5 +181,5 @@ def ask(req: AskRequest, request: Request, x_brain_key: str = Header(None),
         return {"q": q, "empty": True, "answer": None, "sources": [], "coverage": res["coverage"]}
     brain.add_spend("claude", res["usd"], "web question")
     return {"q": q, "empty": False, "answer": res["answer"],
-            "sources": _sources(res["candidates"], res["cited"]),
+            "sources": _sources(ctx, res["candidates"], res["cited"]),
             "coverage": res["coverage"], "cost_usd": round(res["usd"], 4)}

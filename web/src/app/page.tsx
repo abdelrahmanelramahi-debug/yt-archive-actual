@@ -2,6 +2,7 @@
 
 import { useEffect, useRef, useState } from "react";
 
+type Line = { ts: string | null; text: string };
 type Source = {
   n: number;
   timestamp: string;
@@ -9,6 +10,8 @@ type Source = {
   channel: string | null;
   date: string | null;
   url: string;
+  context?: Line[]; // a short window of surrounding transcript
+  citedIdx?: number; // which line in `context` is the cited moment
 };
 type Coverage = { moments: number; videos: number; channels: number };
 type Answer = {
@@ -29,6 +32,21 @@ const TYPICAL_COST = 0.08;
 // Prices are shown to visitors in AED (UAE dirham), converted from the USD the brain reports.
 const AED_PER_USD = 3.6725; // fixed USD peg
 const aed = (usd: number) => `AED ${(usd * AED_PER_USD).toFixed(2)}`;
+
+// Hero counts: the real totals, floored to a clean increment with a "+" so they never overstate
+// and bump up a step as the archive grows.
+function heroVideos(n: number): string {
+  if (n >= 1000) return (Math.floor(n / 1000) * 1000).toLocaleString() + "+";
+  return n.toLocaleString();
+}
+function heroMoments(n: number): string {
+  if (n >= 1_000_000) {
+    const m = Math.round(n / 100_000) / 10; // headline figure, to the nearest 100k (e.g. 1.1M)
+    return (Number.isInteger(m) ? m.toString() : m.toFixed(1)) + "M+";
+  }
+  if (n >= 1000) return Math.round(n / 1000).toLocaleString() + "K+";
+  return n.toLocaleString();
+}
 
 const EXAMPLES = [
   "What is the correct belief about Allah's names and attributes?", // broad (aqeedah)
@@ -470,6 +488,7 @@ export default function Home() {
   const [modes, setModes] = useState<Mode[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [mode, setMode] = useState("standard");
+  const [totals, setTotals] = useState<{ moments: number; videos: number } | null>(null);
 
   // check whether this visitor is through the invite gate
   useEffect(() => {
@@ -490,6 +509,9 @@ export default function Home() {
         setSelected(new Set(chs.map((c) => c.slug)));
         if (Array.isArray(d.modes) && d.modes.length) setModes(d.modes);
         if (d.default_mode) setMode(d.default_mode);
+        if (typeof d.total_moments === "number" && typeof d.total_videos === "number") {
+          setTotals({ moments: d.total_moments, videos: d.total_videos });
+        }
       })
       .catch(() => {});
   }, [authed]);
@@ -540,6 +562,17 @@ export default function Home() {
     ask(q);
   }
 
+  // the logo returns to the landing hero (soft reset, no reload)
+  function goHome() {
+    setAsked(null);
+    setResult(null);
+    setStatus("idle");
+    setError("");
+    setQ("");
+    setReturnY(null);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
   function scrollToSource(n: number) {
     const el = document.getElementById(`src-${n}`);
     if (!el) return;
@@ -565,7 +598,14 @@ export default function Home() {
     <main className={`mx-auto w-full max-w-3xl px-5 ${landing ? "pb-10" : "pb-28"}`}>
       {/* header: identity + persistent cost */}
       <header className="flex items-center justify-between py-6">
-        <Wordmark />
+        <button
+          type="button"
+          onClick={goHome}
+          aria-label="La Tafti — back to home"
+          className="-m-1 rounded-md p-1 transition hover:opacity-75"
+        >
+          <Wordmark />
+        </button>
         <ThemeSelector />
       </header>
 
@@ -582,9 +622,9 @@ export default function Home() {
               you can open on the video.
             </p>
             <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-3 sm:mt-7 sm:gap-x-10 sm:gap-y-4">
-              <Stat n="20,000+" label="videos" />
+              <Stat n={totals ? heroVideos(totals.videos) : "20,000+"} label="videos" />
               <span className="hidden h-10 w-px bg-line sm:block" />
-              <Stat n="1.1M+" label="searchable moments" />
+              <Stat n={totals ? heroMoments(totals.moments) : "1.1M+"} label="searchable moments" />
               <span className="hidden h-10 w-px bg-line sm:block" />
               <Stat n={String(channels.length || 19)} label="channels" />
             </div>
@@ -617,8 +657,8 @@ export default function Home() {
           {/* controls ABOVE the bar: scope / cost on top, the pickers sit right above the bar */}
           {channels.length > 0 && (
             <>
-              {/* mobile: channel icon + mode drop-up on one compact line */}
-              <div className="mb-4 flex items-center gap-2 sm:hidden">
+              {/* mobile: channel icon + mode drop-up on one compact line, right-aligned */}
+              <div className="mb-4 flex items-center justify-end gap-2 sm:hidden">
                 <ChannelPicker channels={channels} selected={selected} onChange={setSelected} compact />
                 <ModeDropup modes={modes} mode={mode} onChange={setMode} />
                 {noneSelected && <span className="text-[13px] text-danger">Pick a channel</span>}
@@ -683,9 +723,23 @@ export default function Home() {
       {/* conversation area */}
       {asked && (
         <section className="mt-9">
-          <h2 dir="auto" className="font-serif text-[1.4rem] font-medium leading-snug text-ink">
-            {asked}
-          </h2>
+          <div className="flex items-start justify-between gap-4">
+            <h2 dir="auto" className="min-w-0 font-serif text-[1.4rem] font-medium leading-snug text-ink">
+              {asked}
+            </h2>
+            {status === "done" && result && !result.empty && result.sources.length > 0 && (
+              <button
+                type="button"
+                onClick={() => document.getElementById("sources")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+                className="mt-1 inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line bg-raised/60 px-2.5 py-1 text-[12px] text-muted transition hover:border-line2 hover:text-ink"
+              >
+                Skip to videos
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+                  <path d="M12 5v14M12 19l-6-6M12 19l6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            )}
+          </div>
 
           {status === "loading" && <Loading stage={stage} />}
 
@@ -740,22 +794,8 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) =>
   const cov = result.coverage;
   return (
     <div className="fade-up mt-6">
-      {result.sources.length > 0 && (
-        <div className="mb-4 flex justify-end">
-          <button
-            type="button"
-            onClick={() => document.getElementById("sources")?.scrollIntoView({ behavior: "smooth", block: "start" })}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-raised/60 px-2.5 py-1 text-[12px] text-muted transition hover:border-line2 hover:text-ink"
-          >
-            Skip to sources
-            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <path d="M12 5v14M12 19l-6-6M12 19l6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
-        </div>
-      )}
       <article className="max-w-[66ch] text-[16px] leading-[1.8] text-ink">
-        {renderAnswer(result.answer, onCite)}
+        {renderAnswer(stripEchoedQuestion(result.answer, result.q), onCite)}
       </article>
 
       {/* provenance + actual cost (clear, echoing the header pill) */}
@@ -780,33 +820,110 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) =>
           <h3 className="mb-3 font-serif text-sm font-medium text-muted">Sources</h3>
           <div className="space-y-2">
             {result.sources.map((s) => (
-              <a
-                key={s.n}
-                id={`src-${s.n}`}
-                href={s.url}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="flex items-start gap-3.5 rounded-xl border border-line bg-raised px-4 py-3 transition hover:border-line2 hover:shadow-[0_8px_24px_-16px_rgba(35,33,27,0.35)]"
-              >
-                <span className="mt-0.5 min-w-6 font-serif text-[15px] font-semibold tabular-nums text-gold">
-                  {s.n}
-                </span>
-                <span className="min-w-0 flex-1">
-                  <span className="line-clamp-2 text-sm text-ink" dir="auto">
-                    {s.title}
-                  </span>
-                  <span className="mt-1 block text-xs text-faint">
-                    <span className="font-medium text-accent">{s.timestamp}</span>
-                    {s.channel ? ` · ${s.channel}` : ""}
-                    {s.date ? ` · ${s.date}` : ""}
-                  </span>
-                </span>
-                <svg className="mt-0.5 shrink-0 text-faint" width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
-                  <path d="M7 17 17 7M9 7h8v8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-                </svg>
-              </a>
+              <SourceCard key={s.n} s={s} />
             ))}
           </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* A cited source. The card shows a 3-line transcript peek (the cited line in full contrast,
+   the lines before/after greyed); tapping it opens the surrounding transcript in a scrollable
+   panel with the cited line centred. The arrow icon opens the moment on YouTube. */
+function SourceCard({ s }: { s: Source }) {
+  const [open, setOpen] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const citedRef = useRef<HTMLParagraphElement>(null);
+  const ctx = s.context ?? [];
+  const ci = s.citedIdx ?? 0;
+  const prev = ci > 0 ? ctx[ci - 1] : null;
+  const cited = ctx[ci];
+  const next = ci < ctx.length - 1 ? ctx[ci + 1] : null;
+
+  // When the transcript opens, centre the cited line inside its own scroll box (not the page).
+  // Measure against the box's own rect so it works regardless of the nearest positioned ancestor.
+  useEffect(() => {
+    if (!open) return;
+    const box = scrollRef.current, line = citedRef.current;
+    if (!box || !line) return;
+    const rel = line.getBoundingClientRect().top - box.getBoundingClientRect().top + box.scrollTop;
+    box.scrollTop = rel - box.clientHeight / 2 + line.clientHeight / 2;
+  }, [open]);
+
+  return (
+    <div
+      id={`src-${s.n}`}
+      className="overflow-hidden rounded-xl border border-line bg-raised transition hover:border-line2"
+    >
+      <div className="flex items-start gap-3.5 px-4 py-3">
+        <span className="mt-0.5 min-w-6 font-serif text-[15px] font-semibold tabular-nums text-gold">
+          {s.n}
+        </span>
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          className="min-w-0 flex-1 text-left"
+        >
+          <span className="line-clamp-2 text-sm text-ink" dir="auto">
+            {s.title}
+          </span>
+          <span className="mt-1 block text-xs text-faint">
+            <span className="font-medium text-accent">{s.timestamp}</span>
+            {s.channel ? ` · ${s.channel}` : ""}
+            {s.date ? ` · ${s.date}` : ""}
+          </span>
+          {cited && !open && (
+            <span className="mt-2 block text-[13px] leading-snug" dir="auto">
+              {prev && <span className="block truncate text-faint/60">{prev.text}</span>}
+              <span className="block line-clamp-2 text-ink">{cited.text}</span>
+              {next && <span className="block truncate text-faint/60">{next.text}</span>}
+            </span>
+          )}
+          {ctx.length > 1 && (
+            <span className="mt-1.5 flex items-center gap-1 text-[11px] font-medium text-faint">
+              <svg
+                width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden
+                className={`transition-transform ${open ? "rotate-180" : ""}`}
+              >
+                <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              {open ? "Hide transcript" : "Read transcript"}
+            </span>
+          )}
+        </button>
+        <a
+          href={s.url}
+          target="_blank"
+          rel="noopener noreferrer"
+          aria-label="Open this moment on YouTube"
+          className="mt-0.5 shrink-0 rounded-md p-1 text-faint transition hover:bg-line/40 hover:text-accent"
+        >
+          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
+            <path d="M7 17 17 7M9 7h8v8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </a>
+      </div>
+      {open && ctx.length > 0 && (
+        <div
+          ref={scrollRef}
+          className="transcript-scroll max-h-56 overflow-y-auto border-t border-line px-4 py-3"
+        >
+          {ctx.map((ln, i) => (
+            <p
+              key={i}
+              ref={i === ci ? citedRef : undefined}
+              dir="auto"
+              className={`py-1 text-[13px] leading-relaxed ${
+                i === ci ? "font-medium text-ink" : "text-faint/70"
+              }`}
+            >
+              {ln.ts && <span className="mr-2 align-middle text-[10px] tabular-nums text-muted/70">{ln.ts}</span>}
+              {ln.text}
+            </p>
+          ))}
         </div>
       )}
     </div>
@@ -817,6 +934,25 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) =>
    Line-based so a "### Heading" is caught even when the model glues it to the next line. */
 const HEADING = /^\s*(#{1,4})\s+(.*)$/;
 const BULLET = /^\s*([-*•]|\d+[.)])\s+/;
+
+/* The model often opens by echoing the question as a heading; the page already shows the
+   question above the answer, so drop that leading echo to avoid a duplicate. */
+function stripEchoedQuestion(answer: string, question?: string): string {
+  const norm = (s: string) => s.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const q = norm(question || "");
+  if (!q) return answer;
+  const lines = answer.split("\n");
+  let i = 0;
+  while (i < lines.length && !lines[i].trim()) i++; // skip any leading blank lines
+  const m = i < lines.length ? lines[i].match(HEADING) : null;
+  if (m) {
+    const h = norm(m[2]);
+    if (h === q || (h.length >= 8 && (q.includes(h) || h.includes(q)))) {
+      return lines.slice(i + 1).join("\n").replace(/^\n+/, "");
+    }
+  }
+  return answer;
+}
 
 function renderAnswer(text: string, onCite: (n: number) => void) {
   const lines = text.split("\n");

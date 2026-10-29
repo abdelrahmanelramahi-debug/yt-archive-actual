@@ -149,3 +149,9 @@ body {
   box-shadow: 0 0 0 1.5px var(--color-accent), 0 10px 30px -14px rgba(var(--c-accent-rgb), 0.5);
   border-color: var(--color-accent) !important;
 }
+
+/* Expanded transcript: fade the top/bottom edges so it reads as scrollable. */
+.transcript-scroll {
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
+}

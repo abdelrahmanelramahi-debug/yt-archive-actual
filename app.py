@@ -3812,6 +3812,8 @@ def load_search(settings, scope):
         kept = [by_id[ids[i]] for i in keep]
         for c in kept:
             c["channel"] = name
+            c["_slug"] = ch["slug"]  # so the transcript window knows which channel a moment is from
+            c["_kw"] = False
         chunks += kept
         mats.append(mat[keep])
         row_slugs += [ch["slug"]] * len(kept)  # which channel each matrix row belongs to
@@ -3822,11 +3824,12 @@ def load_search(settings, scope):
                if row_slugs else np.zeros(0, dtype=np.int32))
     lowered = [(c["title"] + " " + c["text"]).lower() for c in chunks]
     embedder = get_embedder(model_name) if mat is not None else None
-    kw_count = 0
+    kw_count, kw_videos = 0, 0
     for ch in kw_scope:
         try:
             con = kw_db(ch)
             kw_count += con.execute("SELECT count(*) FROM info").fetchone()[0]
+            kw_videos += con.execute("SELECT count(DISTINCT video_id) FROM info").fetchone()[0]
             con.close()
         except Exception:
             pass
@@ -3837,13 +3840,16 @@ def load_search(settings, scope):
                 settings["answer_language"], "Answer in the same language as the question.")
     return {"settings": settings, "anth": anth, "scope": scope, "kw_scope": kw_scope,
             "chunks": chunks, "mat": mat, "lowered": lowered, "embedder": embedder,
+            "by_id": {c["chunk_id"]: c for c in chunks},  # chunk lookup for transcript windows
+
             "model_name": model_name, "lang": lang,
             "names": ", ".join(channel_label(c) for c in scope),
             "row_cid": row_cid, "slug_to_cid": slug_to_cid,
             "channels_meta": [{"slug": c["slug"], "name": full_name(c),
                                "kind": "keyword" if c.get("search") == "keyword" else "meaning"}
                               for c in scope],
-            "total_moments": len(chunks) + kw_count}
+            "total_moments": len(chunks) + kw_count,
+            "total_videos": len({c["video_id"] for c in chunks}) + kw_videos}
 
 
 def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6):
@@ -3888,6 +3894,8 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6):
             nm = full_name(ch)  # current display name, so a rename shows without re-indexing
             for h in hits:
                 h["channel"] = nm
+                h["_slug"] = ch["slug"]
+                h["_kw"] = True
             lists.append(hits)
         for i in range(max((len(x) for x in lists), default=0)):  # interleave channels
             kw_hits += [x[i] for x in lists if i < len(x)]
@@ -3934,6 +3942,47 @@ def answer_question(ctx, q, channels=None, mode=None):
                 "coverage": {"moments": 0, "videos": 0, "channels": 0}, "usd": 0.0}
     res = synthesize(ctx, q, candidates)
     return {"q": q, "empty": False, "candidates": candidates, "queries": queries, **res}
+
+
+def transcript_context(ctx, chunk, before=4, after=4):
+    """A window of consecutive transcript segments around `chunk`, for the website's source
+    preview (3 lines, centre emphasised) and the expand-to-scroll view. Returns (lines, cited_idx)
+    where lines is [{"ts": str, "text": str}] in time order and cited_idx marks the cited segment.
+    Semantic moments are already in memory; keyword-channel moments are read from the FTS db."""
+    vid, cid = chunk.get("video_id"), chunk.get("chunk_id")
+    one = [{"ts": chunk.get("timestamp"), "text": chunk.get("text", "")}]  # safe fallback: cited line only
+    if not vid:
+        return one, 0
+    if chunk.get("_kw"):
+        ch = next((c for c in ctx["scope"] if c.get("slug") == chunk.get("_slug")), None)
+        if ch is None:
+            return one, 0
+        try:
+            con = kw_db(ch)
+            rows = con.execute("SELECT chunk_id, ts, text FROM info WHERE video_id=? ORDER BY chunk_id",
+                               (vid,)).fetchall()
+            con.close()
+        except Exception:
+            rows = []
+        if not rows:
+            return one, 0
+        pos = next((i for i, r in enumerate(rows) if r[0] == cid),
+                   next((i for i, r in enumerate(rows) if r[1] == chunk.get("timestamp")), 0))
+        lo, hi = max(0, pos - before), min(len(rows), pos + after + 1)
+        return [{"ts": r[1], "text": r[2]} for r in rows[lo:hi]], pos - lo
+    # semantic channel: neighbours share the video with adjacent chunk indices (chunk_id = vid_NNNN)
+    n = chunk.get("n")
+    if n is None:
+        return one, 0
+    by_id, lines, cited_idx = ctx.get("by_id", {}), [], 0
+    for i in range(n - before, n + after + 1):
+        c = by_id.get(f"{vid}_{i:04d}")
+        if c is None:
+            continue
+        if i == n:
+            cited_idx = len(lines)
+        lines.append({"ts": c.get("timestamp"), "text": c.get("text", "")})
+    return (lines, cited_idx) if lines else (one, 0)
 
 
 def ask(settings):
