@@ -62,7 +62,7 @@ function Gate({ onOk }: { onOk: () => void }) {
   }
 
   return (
-    <main className="grid min-h-[80vh] place-items-center px-5">
+    <main className="flex min-h-[80vh] items-center justify-center px-5">
       <div className="fade-up w-full max-w-sm">
         <div className="mb-6 flex items-center justify-center gap-2.5">
           <div className="grid h-7 w-7 place-items-center rounded-lg bg-accent/15 text-accent">
