@@ -67,7 +67,13 @@ def health():
     ctx = STATE.get("ctx")
     settings = STATE.get("settings") or {}
     # diagnostics so we can tell *why* it isn't ready (data missing vs key missing)
-    diag = {"anthropic_key": bool(brain.need_key("ANTHROPIC_API_KEY"))}
+    diag = {"anthropic_key": bool(brain.need_key("ANTHROPIC_API_KEY")),
+            "data_url_set": bool(os.environ.get("DATA_ARCHIVE_URL")),
+            "output_dir": str(brain.OUTPUT)}
+    try:
+        diag["output_entries"] = sorted(p.name for p in brain.OUTPUT.iterdir())[:30]
+    except Exception as e:
+        diag["output_entries"] = f"error: {str(e)[:120]}"
     try:
         diag["channels_with_data"] = len(brain.searchable_channels(settings)) if settings else 0
     except Exception as e:
