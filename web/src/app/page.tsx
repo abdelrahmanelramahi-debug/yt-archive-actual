@@ -509,6 +509,7 @@ export default function Home() {
     setStatus("loading");
     setResult(null);
     setError("");
+    setReturnY(null);
     try {
       const useSubset = channels.length > 0 && selected.size > 0 && selected.size < channels.length;
       const r = await fetch("/api/ask", {
@@ -542,11 +543,13 @@ export default function Home() {
   function scrollToSource(n: number) {
     const el = document.getElementById(`src-${n}`);
     if (!el) return;
+    setReturnY(window.scrollY); // remember where the citation was, for the jump-back button
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     el.classList.add("src-hit");
     setTimeout(() => el.classList.remove("src-hit"), 1600);
   }
 
+  const [returnY, setReturnY] = useState<number | null>(null);
   const landing = status === "idle";
   const noneSelected = channels.length > 0 && selected.size === 0;
   const modeUsd = modes.find((m) => m.id === mode)?.usd ?? TYPICAL_COST;
@@ -695,6 +698,23 @@ export default function Home() {
           {status === "done" && result && <AnswerView result={result} onCite={scrollToSource} />}
         </section>
       )}
+
+      {/* jump-back: appears after a citation jump, returns you to where you were reading */}
+      {returnY !== null && (
+        <button
+          type="button"
+          aria-label="Back to where you were"
+          onClick={() => {
+            window.scrollTo({ top: returnY, behavior: "smooth" });
+            setReturnY(null);
+          }}
+          className="fixed bottom-6 left-1/2 z-40 grid h-11 w-11 -translate-x-1/2 place-items-center rounded-full bg-accent text-paper shadow-[0_8px_30px_-6px_rgba(15,107,87,0.5)] transition hover:bg-accent2"
+        >
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+            <path d="M12 19V5M12 5l-6 6M12 5l6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+      )}
     </main>
   );
 }
@@ -720,6 +740,20 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) =>
   const cov = result.coverage;
   return (
     <div className="fade-up mt-6">
+      {result.sources.length > 0 && (
+        <div className="mb-4 flex justify-end">
+          <button
+            type="button"
+            onClick={() => document.getElementById("sources")?.scrollIntoView({ behavior: "smooth", block: "start" })}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-raised/60 px-2.5 py-1 text-[12px] text-muted transition hover:border-line2 hover:text-ink"
+          >
+            Skip to sources
+            <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M12 5v14M12 19l-6-6M12 19l6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
+      )}
       <article className="max-w-[66ch] text-[16px] leading-[1.8] text-ink">
         {renderAnswer(result.answer, onCite)}
       </article>
@@ -742,7 +776,7 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) =>
       </div>
 
       {result.sources.length > 0 && (
-        <div className="mt-7">
+        <div id="sources" className="mt-7">
           <h3 className="mb-3 font-serif text-sm font-medium text-muted">Sources</h3>
           <div className="space-y-2">
             {result.sources.map((s) => (
