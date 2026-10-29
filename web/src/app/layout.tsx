@@ -1,5 +1,6 @@
 import type { Metadata, Viewport } from "next";
 import { Inter, Fraunces } from "next/font/google";
+import Script from "next/script";
 import "./globals.css";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
@@ -22,15 +23,23 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  themeColor: "#f3f1e9",
+  themeColor: [
+    { media: "(prefers-color-scheme: light)", color: "#f5f3ed" },
+    { media: "(prefers-color-scheme: dark)", color: "#16150f" },
+  ],
 };
 
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
+  // Set the theme before paint so there's no flash of the wrong colours.
+  const themeInit = `(function(){try{var c=localStorage.getItem('theme')||'sepia';var t=c==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):c;var e=document.documentElement;e.setAttribute('data-theme',t);e.setAttribute('data-theme-choice',c);}catch(e){document.documentElement.setAttribute('data-theme','sepia');}})();`;
   return (
-    <html lang="en" className={`${inter.variable} ${fraunces.variable}`}>
-      <body>{children}</body>
+    <html lang="en" className={`${inter.variable} ${fraunces.variable}`} data-theme="sepia" suppressHydrationWarning>
+      <body>
+        <Script id="theme-init" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: themeInit }} />
+        {children}
+      </body>
     </html>
   );
 }

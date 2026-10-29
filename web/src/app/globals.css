@@ -1,23 +1,77 @@
 @import "tailwindcss";
 
 @theme {
-  /* Parchment reading-room palette — warm paper, deep emerald, brass.
-     Deliberately not near-black+accent, and not cream+terracotta. */
-  --color-paper: #f3f1e9;      /* page background (warm parchment) */
-  --color-raised: #fbfaf5;     /* input, source cards (a fresh sheet) */
-  --color-ink: #23211b;        /* primary text (warm near-black) */
-  --color-muted: #6a685e;      /* secondary text */
-  --color-faint: #9b988c;      /* tertiary / meta */
-  --color-line: #e3e0d5;       /* hairline */
-  --color-line2: #d2cebf;      /* stronger hairline / hover */
-  --color-accent: #0f6b57;     /* deep emerald (primary) */
-  --color-accent2: #0b5444;    /* emerald hover/pressed */
-  --color-gold: #9a7736;       /* brass (numerals, cost) */
-  --color-gold2: #7d5f27;      /* brass, darker text */
-  --color-danger: #9e3b2e;     /* error text */
+  /* Tokens point at runtime vars so the theme can switch live (see [data-theme] below). */
+  --color-paper: var(--c-paper);
+  --color-raised: var(--c-raised);
+  --color-ink: var(--c-ink);
+  --color-muted: var(--c-muted);
+  --color-faint: var(--c-faint);
+  --color-line: var(--c-line);
+  --color-line2: var(--c-line2);
+  --color-accent: var(--c-accent);
+  --color-accent2: var(--c-accent2);
+  --color-gold: var(--c-gold);
+  --color-gold2: var(--c-gold2);
+  --color-danger: var(--c-danger);
 
   --font-sans: var(--font-inter), ui-sans-serif, system-ui, sans-serif;
   --font-serif: var(--font-fraunces), ui-serif, Georgia, "Times New Roman", serif;
+}
+
+/* Sepia (default) — the warm parchment brand look, toned down a touch. */
+:root,
+:root[data-theme="sepia"] {
+  --c-paper: #f5f3ed;
+  --c-raised: #fcfbf7;
+  --c-ink: #24221c;
+  --c-muted: #6c6a60;
+  --c-faint: #9c998d;
+  --c-line: #e6e3d9;
+  --c-line2: #d6d2c6;
+  --c-accent: #0f6b57;
+  --c-accent2: #0b5444;
+  --c-gold: #9a7736;
+  --c-gold2: #7d5f27;
+  --c-danger: #9e3b2e;
+  --c-accent-rgb: 15, 107, 87;
+  color-scheme: light;
+}
+
+/* Light — clean, near-neutral. */
+:root[data-theme="light"] {
+  --c-paper: #fafaf8;
+  --c-raised: #ffffff;
+  --c-ink: #1b1b1e;
+  --c-muted: #5f5f67;
+  --c-faint: #9a9aa2;
+  --c-line: #ebeae7;
+  --c-line2: #dbdad6;
+  --c-accent: #0f6b57;
+  --c-accent2: #0b5444;
+  --c-gold: #8f7236;
+  --c-gold2: #725829;
+  --c-danger: #b23b2b;
+  --c-accent-rgb: 15, 107, 87;
+  color-scheme: light;
+}
+
+/* Dark — warm near-black with a lighter emerald, not the old near-black+accent slop. */
+:root[data-theme="dark"] {
+  --c-paper: #16150f;
+  --c-raised: #201e16;
+  --c-ink: #ece9df;
+  --c-muted: #a7a395;
+  --c-faint: #767260;
+  --c-line: #2d2a20;
+  --c-line2: #3b3729;
+  --c-accent: #4fae93;
+  --c-accent2: #67c0a7;
+  --c-gold: #c7a15d;
+  --c-gold2: #d8ba78;
+  --c-danger: #e0897b;
+  --c-accent-rgb: 79, 174, 147;
+  color-scheme: dark;
 }
 
 html,
@@ -36,13 +90,23 @@ body {
 }
 
 ::selection {
-  background: rgba(15, 107, 87, 0.16);
+  background: rgba(var(--c-accent-rgb), 0.16);
 }
 
-/* quiet, warm scrollbar */
+/* quiet scrollbar */
 * {
   scrollbar-width: thin;
   scrollbar-color: var(--color-line2) transparent;
+}
+
+/* La Tifti wordmark: the uploaded logo as a theme-coloured mask (adapts to any theme). */
+.logo-mark {
+  display: inline-block;
+  height: 30px;
+  aspect-ratio: 966 / 226;
+  background-color: var(--color-accent);
+  -webkit-mask: url(/logo.png) center / contain no-repeat;
+  mask: url(/logo.png) center / contain no-repeat;
 }
 
 /* One orchestrated entrance, used sparingly. */
@@ -82,6 +146,6 @@ body {
 
 /* Source card flash when a citation jumps to it. */
 .src-hit {
-  box-shadow: 0 0 0 1.5px var(--color-accent), 0 10px 30px -14px rgba(15, 107, 87, 0.5);
+  box-shadow: 0 0 0 1.5px var(--color-accent), 0 10px 30px -14px rgba(var(--c-accent-rgb), 0.5);
   border-color: var(--color-accent) !important;
 }

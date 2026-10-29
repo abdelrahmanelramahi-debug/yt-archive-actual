@@ -44,15 +44,123 @@ const STAGES = [
   "Writing a grounded answer",
 ];
 
-// Pure type wordmark — Latin name beside the Arabic it comes from. No icon: a
-// generic glyph here is the first thing that reads as templated.
+// La Tifti wordmark — the uploaded logo, recoloured per theme via a CSS mask.
 function Wordmark() {
+  return <span className="logo-mark shrink-0" role="img" aria-label="La Tifti · لا تفتي" />;
+}
+
+const THEMES = [
+  { id: "light", label: "Light" },
+  { id: "sepia", label: "Sepia" },
+  { id: "dark", label: "Dark" },
+  { id: "system", label: "System" },
+];
+
+function applyTheme(choice: string) {
+  const t =
+    choice === "system"
+      ? window.matchMedia("(prefers-color-scheme: dark)").matches
+        ? "dark"
+        : "light"
+      : choice;
+  const el = document.documentElement;
+  el.setAttribute("data-theme", t);
+  el.setAttribute("data-theme-choice", choice);
+}
+
+function ThemeIcon({ id }: { id: string }) {
+  const p = { width: 15, height: 15, viewBox: "0 0 24 24", fill: "none", stroke: "currentColor", strokeWidth: 1.7, strokeLinecap: "round" as const, strokeLinejoin: "round" as const };
+  if (id === "light")
+    return (
+      <svg {...p} aria-hidden>
+        <circle cx="12" cy="12" r="4" />
+        <path d="M12 2v2M12 20v2M4.9 4.9l1.4 1.4M17.7 17.7l1.4 1.4M2 12h2M20 12h2M4.9 19.1l1.4-1.4M17.7 6.3l1.4-1.4" />
+      </svg>
+    );
+  if (id === "dark")
+    return (
+      <svg {...p} aria-hidden>
+        <path d="M21 12.8A9 9 0 1 1 11.2 3a7 7 0 0 0 9.8 9.8Z" />
+      </svg>
+    );
+  if (id === "system")
+    return (
+      <svg {...p} aria-hidden>
+        <rect x="3" y="4" width="18" height="12" rx="2" />
+        <path d="M8 20h8M12 16v4" />
+      </svg>
+    );
+  // sepia
   return (
-    <div className="flex shrink-0 items-baseline gap-2.5">
-      <span className="font-serif text-[19px] font-medium tracking-tight text-ink">La Tifti</span>
-      <span className="text-[15px] text-faint" dir="rtl" lang="ar">
-        لا تفتي
-      </span>
+    <svg {...p} aria-hidden>
+      <path d="M12 3s6 5.7 6 10a6 6 0 0 1-12 0c0-4.3 6-10 6-10Z" />
+    </svg>
+  );
+}
+
+// Display selector: Light / Sepia / Dark / System, remembered in localStorage.
+function ThemeSelector() {
+  const [choice, setChoice] = useState("sepia");
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    setChoice(document.documentElement.getAttribute("data-theme-choice") || "sepia");
+  }, []);
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+  useEffect(() => {
+    if (choice !== "system") return;
+    const mq = window.matchMedia("(prefers-color-scheme: dark)");
+    const h = () => applyTheme("system");
+    mq.addEventListener("change", h);
+    return () => mq.removeEventListener("change", h);
+  }, [choice]);
+
+  function pick(c: string) {
+    setChoice(c);
+    try {
+      localStorage.setItem("theme", c);
+    } catch {
+      /* ignore */
+    }
+    applyTheme(c);
+    setOpen(false);
+  }
+
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-label="Display theme"
+        className="grid h-9 w-9 place-items-center rounded-lg border border-line text-muted transition hover:border-line2 hover:text-ink"
+      >
+        <ThemeIcon id={choice} />
+      </button>
+      {open && (
+        <div className="absolute right-0 z-30 mt-1.5 w-36 rounded-xl border border-line bg-raised p-1 shadow-[0_16px_40px_-16px_rgba(0,0,0,0.3)]">
+          {THEMES.map((t) => (
+            <button
+              key={t.id}
+              type="button"
+              onClick={() => pick(t.id)}
+              className={`flex w-full items-center gap-2.5 rounded-lg px-2.5 py-1.5 text-[13px] transition ${
+                choice === t.id ? "text-accent" : "text-muted hover:bg-paper hover:text-ink"
+              }`}
+            >
+              <ThemeIcon id={t.id} />
+              {t.label}
+            </button>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -377,8 +485,9 @@ export default function Home() {
   return (
     <main className="mx-auto w-full max-w-3xl px-5 pb-28">
       {/* header: identity + persistent cost */}
-      <header className="py-6">
+      <header className="flex items-center justify-between py-6">
         <Wordmark />
+        <ThemeSelector />
       </header>
 
       {/* hero + suggestions + ask */}
