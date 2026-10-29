@@ -4241,14 +4241,13 @@ def duplicates_menu(settings):
     say("This scans every transcript for near-verbatim clips or excerpts of a longer video. It ignores\n"
         "shared Quran, hadith and stock phrases, so two different videos on the same topic are not flagged.\n"
         "It runs on your PC and costs nothing.")
-    opts = [(1, "Scan and show what would be nested (changes nothing)"),
-            (2, "Scan and nest the clips under their main videos")]
+    opts = [(1, "Scan for duplicate / excerpt videos")]
     if cur:
-        opts.append((3, "Remove all nesting (show every video on its own again)"))
+        opts.append((2, "Remove all nesting (show every video on its own again)"))
     k = choose("Pick (Enter to go back)", opts, allow_blank=True)
     if not k:
         return
-    if k == "3":
+    if k == "2":
         if NESTS_PATH.exists():
             NESTS_PATH.unlink()
         ok("Nesting removed.")
@@ -4279,13 +4278,13 @@ def duplicates_menu(settings):
     if len(groups) > 12:
         say(f"  ...and {len(groups) - 12} more group(s).")
     say(f"{D}Full list saved to output\\duplicates_report.md{X}")
-    if k == "1":
-        ok("\nNothing changed. Review the report, then run this again to nest them.")
-        return
+    # one scan, then decide - the results are applied right here, no second scan needed
     if yes("\nNest these clips under their main videos? (reversible; the clip files are kept)"):
         n = apply_nests(groups)
         ok(f"Nested {plural(n, 'clip')}. They now appear under their main video, not on their own.")
         _refresh_app()
+    else:
+        say(f"{D}Left as is - nothing changed. The full list is in output\\duplicates_report.md.{X}")
 
 
 # ---------------------------------------------------------------- menu screens
