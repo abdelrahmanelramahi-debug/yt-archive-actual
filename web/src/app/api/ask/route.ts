@@ -1,9 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 
-// Runs server-side only: the brain URL and key never reach the browser.
-export const runtime = "nodejs";
-export const maxDuration = 60;
-
+// Runs server-side only (Node runtime by default): the brain URL and key never reach the browser.
 const BRAIN_URL = process.env.BRAIN_URL || "http://127.0.0.1:8000";
 const BRAIN_KEY = process.env.BRAIN_KEY || "";
 
