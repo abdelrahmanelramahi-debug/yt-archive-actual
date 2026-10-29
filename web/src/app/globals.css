@@ -159,3 +159,41 @@ body {
   -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
   mask-image: linear-gradient(to bottom, transparent 0, #000 16px, #000 calc(100% - 16px), transparent 100%);
 }
+
+/* "Skip to videos" while the answer is still writing: an accent glow rotates around its border
+   to signal the sources are still loading. The ::before fills the border ring (padding, masked to
+   the edge) with a rotating conic gradient. */
+@property --skip-angle {
+  syntax: "<angle>";
+  inherits: false;
+  initial-value: 0deg;
+}
+.skip-loading {
+  position: relative;
+  color: var(--color-muted);
+}
+.skip-loading::before {
+  content: "";
+  position: absolute;
+  inset: 0;
+  border-radius: inherit;
+  padding: 1.5px;
+  background: conic-gradient(from var(--skip-angle), transparent 58%, var(--color-accent) 82%, transparent 100%);
+  -webkit-mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  -webkit-mask-composite: xor;
+  mask: linear-gradient(#000 0 0) content-box, linear-gradient(#000 0 0);
+  mask-composite: exclude;
+  animation: skip-spin 1.15s linear infinite;
+  pointer-events: none;
+}
+@keyframes skip-spin {
+  to {
+    --skip-angle: 360deg;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  .skip-loading::before {
+    animation: none;
+    background: conic-gradient(var(--color-accent) 0 25%, transparent 0 100%);
+  }
+}

@@ -820,7 +820,7 @@ export default function Home() {
             <h2 dir="auto" className="min-w-0 font-serif text-[1.4rem] font-medium leading-snug text-ink">
               {asked}
             </h2>
-            {status === "done" && result && !result.empty && result.sources.length > 0 && (
+            {status === "done" && result && !result.empty && result.sources.length > 0 ? (
               <button
                 type="button"
                 onClick={() => document.getElementById("sources")?.scrollIntoView({ behavior: "smooth", block: "start" })}
@@ -831,7 +831,19 @@ export default function Home() {
                   <path d="M12 5v14M12 19l-6-6M12 19l6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
               </button>
-            )}
+            ) : status === "loading" || status === "streaming" ? (
+              // sources aren't ready yet: show the chip with a glow rotating round its border
+              <span
+                className="skip-loading mt-1 inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line bg-raised/60 px-2.5 py-1 text-[12px] text-muted"
+                aria-label="Finding the videos"
+                title="Finding the videos…"
+              >
+                Skip to videos
+                <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden className="opacity-60">
+                  <path d="M12 5v14M12 19l-6-6M12 19l6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </span>
+            ) : null}
           </div>
 
           {status === "loading" && <Loading stage={stage} />}
