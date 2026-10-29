@@ -65,9 +65,16 @@ def _sources(candidates, cited):
 @app.get("/health")
 def health():
     ctx = STATE.get("ctx")
+    settings = STATE.get("settings") or {}
+    # diagnostics so we can tell *why* it isn't ready (data missing vs key missing)
+    diag = {"anthropic_key": bool(brain.need_key("ANTHROPIC_API_KEY"))}
+    try:
+        diag["channels_with_data"] = len(brain.searchable_channels(settings)) if settings else 0
+    except Exception as e:
+        diag["channels_with_data"] = f"error: {str(e)[:120]}"
     return {"ok": True, "ready": ctx is not None,
             "moments": ctx["total_moments"] if ctx else 0,
-            "channels": len(ctx["scope"]) if ctx else 0}
+            "channels": len(ctx["scope"]) if ctx else 0, **diag}
 
 
 @app.get("/search")
