@@ -566,8 +566,8 @@ export default function Home() {
         <ThemeSelector />
       </header>
 
-      {/* hero + suggestions + ask (bottom-anchored on desktop; natural flow on mobile) */}
-      <section className={landing ? "pt-6 sm:flex sm:min-h-[calc(100dvh-7rem)] sm:flex-col" : "pt-5"}>
+      {/* hero + suggestions + ask (ask block anchored to the bottom of the viewport on landing) */}
+      <section className={landing ? "flex min-h-[calc(100dvh-6rem)] flex-col pt-6" : "pt-5"}>
         {landing && (
           <div className="fade-up mb-6 sm:mb-8">
             <h1 className="max-w-2xl text-balance font-serif text-[1.6rem] font-medium leading-[1.14] tracking-tight text-ink sm:text-[2.7rem] sm:leading-[1.12]">
@@ -588,8 +588,8 @@ export default function Home() {
           </div>
         )}
 
-        {/* bottom-anchored on desktop; a modest gap on mobile */}
-        <div className={landing ? "mt-6 sm:mt-auto" : ""}>
+        {/* anchored to the bottom of the viewport on landing */}
+        <div className={landing ? "mt-auto" : ""}>
           {/* suggestions */}
           {landing && (
             <div className="fade-up mb-5">
