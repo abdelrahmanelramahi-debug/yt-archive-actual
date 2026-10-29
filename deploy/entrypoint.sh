@@ -7,9 +7,9 @@ if [ ! -d "output" ] || [ -z "$(ls -A output 2>/dev/null)" ]; then
   if [ -n "$DATA_ARCHIVE_URL" ]; then
     echo "[entrypoint] output/ is empty - downloading archive data from DATA_ARCHIVE_URL ..."
     mkdir -p output
-    curl -fL --retry 3 "$DATA_ARCHIVE_URL" -o /tmp/archive.tar.zst
-    tar --use-compress-program=unzstd -xf /tmp/archive.tar.zst -C output
-    rm -f /tmp/archive.tar.zst
+    curl -fL --retry 3 "$DATA_ARCHIVE_URL" -o /tmp/archive.tar.gz
+    tar -xzf /tmp/archive.tar.gz -C output
+    rm -f /tmp/archive.tar.gz
     echo "[entrypoint] archive data ready."
   else
     echo "[entrypoint] WARNING: no output/ data and no DATA_ARCHIVE_URL set - search will be empty."
