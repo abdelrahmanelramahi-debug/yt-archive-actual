@@ -103,7 +103,7 @@ body {
 .logo-mark {
   display: inline-block;
   height: 30px;
-  aspect-ratio: 966 / 226;
+  aspect-ratio: 1000 / 226;
   background-color: var(--color-accent);
   -webkit-mask: url(/logo.png) center / contain no-repeat;
   mask: url(/logo.png) center / contain no-repeat;

@@ -45,7 +45,7 @@ const STAGES = [
 
 // La Tifti wordmark — the uploaded logo, recoloured per theme via a CSS mask.
 function Wordmark() {
-  return <span className="logo-mark shrink-0" role="img" aria-label="La Tifti · لا تفتي" />;
+  return <span className="logo-mark shrink-0" role="img" aria-label="La Tafti · لا تفتي" />;
 }
 
 const THEMES = [
@@ -251,10 +251,12 @@ function ChannelPicker({
   channels,
   selected,
   onChange,
+  compact,
 }: {
   channels: Channel[];
   selected: Set<string>;
   onChange: (next: Set<string>) => void;
+  compact?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -279,19 +281,35 @@ function ChannelPicker({
 
   return (
     <div className="relative" ref={ref}>
-      <button
-        type="button"
-        onClick={() => setOpen((o) => !o)}
-        className="inline-flex items-center gap-1.5 rounded-xl border border-line bg-raised/70 px-3 py-1.5 text-[13px] font-medium text-ink transition hover:border-line2"
-      >
-        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden className="text-muted">
-          <path d="M4 7h16M7 12h10M10 17h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-        </svg>
-        {label}
-        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden className="text-faint">
-          <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-        </svg>
-      </button>
+      {compact ? (
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-label={`Channels: ${label}`}
+          title={label}
+          className={`grid h-9 w-9 place-items-center rounded-xl border bg-raised/70 transition hover:border-line2 ${
+            all ? "border-line text-muted" : "border-accent/60 text-accent"
+          }`}
+        >
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+            <path d="M4 7h16M7 12h10M10 17h4" stroke="currentColor" strokeWidth="1.9" strokeLinecap="round" />
+          </svg>
+        </button>
+      ) : (
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          className="inline-flex items-center gap-1.5 rounded-xl border border-line bg-raised/70 px-3 py-1.5 text-[13px] font-medium text-ink transition hover:border-line2"
+        >
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden className="text-muted">
+            <path d="M4 7h16M7 12h10M10 17h4" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+          </svg>
+          {label}
+          <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden className="text-faint">
+            <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          </svg>
+        </button>
+      )}
       {open && (
         <div className="absolute bottom-full left-0 z-30 mb-1.5 max-h-80 w-72 overflow-auto rounded-xl border border-line bg-raised p-1.5 shadow-[0_-16px_40px_-16px_rgba(35,33,27,0.4)]">
           <div className="flex items-center justify-between px-2 py-1 text-xs">
@@ -318,6 +336,66 @@ function ChannelPicker({
               </span>
             </label>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// Mobile depth selector: a drop-up holding the depths, their cost, and the explainer.
+function ModeDropup({ modes, mode, onChange }: { modes: Mode[]; mode: string; onChange: (id: string) => void }) {
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+  const current = modes.find((m) => m.id === mode);
+  const keeps: Record<string, string> = { quick: "~120", standard: "~500", deep: "~1,000" };
+
+  useEffect(() => {
+    if (!open) return;
+    const onDoc = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener("mousedown", onDoc);
+    return () => document.removeEventListener("mousedown", onDoc);
+  }, [open]);
+
+  if (!modes.length) return null;
+  return (
+    <div className="relative" ref={ref}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        className="inline-flex items-center gap-2 rounded-xl border border-line bg-raised/70 px-3 py-1.5 text-[13px] font-medium text-ink transition hover:border-line2"
+      >
+        {current?.label ?? "Depth"}
+        <span className="text-gold2">≈ {aed(current?.usd ?? TYPICAL_COST)}</span>
+        <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden className="text-faint">
+          <path d="m6 15 6-6 6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+      </button>
+      {open && (
+        <div className="absolute bottom-full right-0 z-30 mb-1.5 w-64 rounded-xl border border-line bg-raised p-1.5 shadow-[0_-16px_40px_-16px_rgba(35,33,27,0.4)]">
+          {modes.map((m) => (
+            <button
+              key={m.id}
+              type="button"
+              onClick={() => {
+                onChange(m.id);
+                setOpen(false);
+              }}
+              className={`flex w-full items-center justify-between gap-3 rounded-lg px-2.5 py-1.5 text-[13px] transition ${
+                mode === m.id ? "bg-accent/10 text-accent" : "text-ink hover:bg-paper"
+              }`}
+            >
+              <span className="font-medium">{m.label}</span>
+              <span className="text-faint">
+                keeps {keeps[m.id] ?? "?"} · {aed(m.usd)}
+              </span>
+            </button>
+          ))}
+          <p className="mt-1.5 border-t border-line px-2.5 pt-2 text-[12px] leading-relaxed text-muted">
+            Every depth searches <strong className="font-semibold text-ink">all 1.1M moments</strong> — it only
+            changes how many of the best it keeps.
+          </p>
         </div>
       )}
     </div>
@@ -535,23 +613,33 @@ export default function Home() {
 
           {/* controls ABOVE the bar: scope / cost on top, the pickers sit right above the bar */}
           {channels.length > 0 && (
-            <div className="mb-4 flex flex-col gap-4 sm:mb-3 sm:flex-row sm:items-end sm:justify-between sm:gap-3">
-              <div className="flex flex-col items-start gap-2">
-                {noneSelected ? (
-                  <p className="text-[13px] text-danger">Pick at least one channel.</p>
-                ) : (
-                  <p className="text-[13px] text-faint">
-                    {selected.size} channel{selected.size === 1 ? "" : "s"}
-                  </p>
-                )}
-                <ChannelPicker channels={channels} selected={selected} onChange={setSelected} />
+            <>
+              {/* mobile: channel icon + mode drop-up on one compact line */}
+              <div className="mb-4 flex items-center gap-2 sm:hidden">
+                <ChannelPicker channels={channels} selected={selected} onChange={setSelected} compact />
+                <ModeDropup modes={modes} mode={mode} onChange={setMode} />
+                {noneSelected && <span className="text-[13px] text-danger">Pick a channel</span>}
               </div>
-              <div className="flex flex-col items-start gap-2 sm:items-end">
-                <ModeExplainer modes={modes} />
-                <p className="text-[13px] text-gold2">≈ {aed(modeUsd)} per answer</p>
-                <ModePicker modes={modes} mode={mode} onChange={setMode} />
+
+              {/* desktop: channel + scope (left); mode + cost + explainer (right) */}
+              <div className="mb-3 hidden sm:flex sm:flex-row sm:items-end sm:justify-between sm:gap-3">
+                <div className="flex flex-col items-start gap-2">
+                  {noneSelected ? (
+                    <p className="text-[13px] text-danger">Pick at least one channel.</p>
+                  ) : (
+                    <p className="text-[13px] text-faint">
+                      {selected.size} channel{selected.size === 1 ? "" : "s"}
+                    </p>
+                  )}
+                  <ChannelPicker channels={channels} selected={selected} onChange={setSelected} />
+                </div>
+                <div className="flex flex-col items-end gap-2">
+                  <ModeExplainer modes={modes} />
+                  <p className="text-[13px] text-gold2">≈ {aed(modeUsd)} per answer</p>
+                  <ModePicker modes={modes} mode={mode} onChange={setMode} />
+                </div>
               </div>
-            </div>
+            </>
           )}
 
           {/* ask bar */}

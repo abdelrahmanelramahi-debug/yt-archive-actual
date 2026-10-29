@@ -14,7 +14,7 @@ const fraunces = Fraunces({
 });
 
 export const metadata: Metadata = {
-  title: "La Tifti · لا تفتي",
+  title: "La Tafti · لا تفتي",
   description:
     "Not a fatwa — the words of the scholars themselves, traced to the moment they were said. Ask across thousands of hours of lectures and debates, with timestamps.",
 };
