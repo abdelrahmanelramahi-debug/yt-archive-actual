@@ -3687,10 +3687,17 @@ CAND_MAX = 500        # how many top moments to feed the deep-answer map-reduce 
 # `usd` is a typical estimate shown in the UI; the real cost comes back with each answer.
 MODES = {
     "quick":    {"label": "Quick",    "cand_max": 120,  "per_video": 4, "usd": 0.03},
-    "standard": {"label": "Standard", "cand_max": 500,  "per_video": 6, "usd": 0.08},
-    "deep":     {"label": "Deep",     "cand_max": 1000, "per_video": 8, "usd": 0.17},
+    "standard": {"label": "Standard", "cand_max": 500,  "per_video": 6, "usd": 0.08, "route": True},
+    "deep":     {"label": "Deep",     "cand_max": 1000, "per_video": 8, "usd": 0.17, "route": True},
 }
 DEFAULT_MODE = "standard"
+
+# Deep-mode routing: pull the best clips from this many topically-matched videos (by centroid),
+# and up to this many clips each, then union them with the direct clip search. ROUTE_MARGIN keeps
+# only routed clips within this cosine of the best direct hit, so off-topic routing adds nothing.
+ROUTE_VIDEOS = 16
+ROUTE_PER_VID = 6
+ROUTE_MARGIN = 0.10
 
 MAP_PROMPT = """Question: {q}
 
@@ -3842,6 +3849,20 @@ def load_search(settings, scope):
     slug_to_cid = {s: i for i, s in enumerate(dict.fromkeys(row_slugs))}
     row_cid = (np.array([slug_to_cid[s] for s in row_slugs], dtype=np.int32)
                if row_slugs else np.zeros(0, dtype=np.int32))
+    # Per-video centroids (the mean of a video's chunk vectors) for deep-mode routing: find the
+    # videos whose overall content matches the question, then pull their best clips - unioned with
+    # the direct clip search so the serendipitous one-off moments are still kept. Built free from
+    # the vectors already in memory, so no re-indexing or re-publishing is needed.
+    vid_ids, vid_mat, vid_rows, vid_cid = [], None, {}, np.zeros(0, dtype=np.int32)
+    if mat is not None and len(chunks):
+        rows_by_vid = {}
+        for i, c in enumerate(chunks):
+            rows_by_vid.setdefault(c["video_id"], []).append(i)
+        vid_ids = list(rows_by_vid.keys())
+        vid_mat = np.vstack([mat[rows_by_vid[v]].mean(axis=0) for v in vid_ids])
+        vid_mat /= np.linalg.norm(vid_mat, axis=1, keepdims=True) + 1e-9
+        vid_cid = np.array([row_cid[rows_by_vid[v][0]] for v in vid_ids], dtype=np.int32)
+        vid_rows = {v: np.array(r, dtype=np.int64) for v, r in rows_by_vid.items()}
     lowered = [(c["title"] + " " + c["text"]).lower() for c in chunks]
     embedder = get_embedder(model_name) if mat is not None else None
     kw_count, kw_videos = 0, 0
@@ -3864,6 +3885,7 @@ def load_search(settings, scope):
             "model_name": model_name, "lang": lang,
             "names": ", ".join(channel_label(c) for c in scope),
             "row_cid": row_cid, "slug_to_cid": slug_to_cid,
+            "vid_ids": vid_ids, "vid_mat": vid_mat, "vid_rows": vid_rows, "vid_cid": vid_cid,
             "channels_meta": [{"slug": c["slug"], "name": full_name(c),
                                "kind": "keyword" if c.get("search") == "keyword" else "meaning"}
                               for c in scope],
@@ -3871,7 +3893,7 @@ def load_search(settings, scope):
             "total_videos": len({c["video_id"] for c in chunks}) + kw_videos}
 
 
-def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6):
+def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False):
     """Find the candidate moments for a question: decompose it into angles, union the semantic and
     keyword retrieval (keeping each chunk's best score), then diversify (<=per_vid per video, up to
     cand_max). `channels` (a list of slugs) limits the search to those channels; None/empty = all.
@@ -3884,17 +3906,19 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6):
     sel = set(channels) if channels else None  # selected channel slugs, or None for all
     sel_ids = [cid for s, cid in ctx["slug_to_cid"].items() if s in sel] if sel else None
     queries = _decompose(anth, settings["tag_model"], q)  # the question broken into several search angles
-    sem_hits = []
+    sem_hits, qvs = [], []
     if mat is not None:
         wterms = [w for w in re.findall(r"\w{4,}", q.lower()) if w not in STOP]
         row_mask = np.isin(ctx["row_cid"], sel_ids) if sel_ids is not None else None
-        best = {}
+        best, best_sim = {}, 0.0
         for sq in queries:
             qv = np.array(list(embedder.query_embed([query_text(model_name, sq)]))[0], dtype=np.float32)
             qv /= np.linalg.norm(qv) + 1e-9
+            qvs.append(qv)  # kept for centroid routing below
             scores = mat @ qv
             if row_mask is not None:
                 scores = np.where(row_mask, scores, -1e9)  # drop deselected channels
+            best_sim = max(best_sim, float(scores.max()))  # the strongest direct hit, for the route floor
             for i in np.argsort(-scores)[:800]:
                 if scores[int(i)] <= -1e8:
                     break  # only deselected rows remain
@@ -3918,8 +3942,33 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6):
             lists.append(hits)
         for i in range(max((len(x) for x in lists), default=0)):  # interleave channels
             kw_hits += [x[i] for x in lists if i < len(x)]
+    # summary-style routing: find the videos whose overall content best matches the question (by
+    # centroid), pull their strongest clips, and union those in - so a video that is *about* the
+    # question contributes even when no single moment topped the direct search.
+    route_hits = []
+    if route and ctx.get("vid_mat") is not None and qvs:
+        vbest = None
+        for qv in qvs:
+            s = ctx["vid_mat"] @ qv
+            vbest = s if vbest is None else np.maximum(vbest, s)
+        if sel_ids is not None:
+            vbest = np.where(np.isin(ctx["vid_cid"], sel_ids), vbest, -1e9)
+        floor = best_sim - ROUTE_MARGIN  # only clips nearly as strong as the best direct hit
+        for vi in np.argsort(-vbest)[:ROUTE_VIDEOS]:
+            vi = int(vi)
+            if vbest[vi] <= -1e8:
+                break  # only deselected videos remain
+            rows = ctx["vid_rows"][ctx["vid_ids"][vi]]
+            cs = None
+            for qv in qvs:
+                s = mat[rows] @ qv
+                cs = s if cs is None else np.maximum(cs, s)
+            for k in np.argsort(-cs)[:ROUTE_PER_VID]:
+                if float(cs[int(k)]) < floor:
+                    break  # clips are sorted strongest-first, so the rest are weaker too
+                route_hits.append(chunks[int(rows[int(k)])])
     # cast a wide net: many moments across many videos, then synthesise with a deep map-reduce
-    streams = [x for x in (sem_hits, kw_hits) if x]
+    streams = [x for x in (sem_hits, kw_hits, route_hits) if x]
     candidates, per_video, seen = [], {}, set()
     idx = [0] * len(streams)
     while len(candidates) < cand_max and any(idx[j] < len(streams[j]) for j in range(len(streams))):
@@ -3955,7 +4004,8 @@ def answer_question(ctx, q, channels=None, mode=None):
     matched). `channels` (slugs) limits the search; `mode` (quick/standard/deep) sets the depth.
     No printing or file I/O - the CLI and the web server format and persist it themselves."""
     m = MODES.get(mode or DEFAULT_MODE, MODES[DEFAULT_MODE])
-    candidates, queries = retrieve(ctx, q, channels=channels, cand_max=m["cand_max"], per_vid=m["per_video"])
+    candidates, queries = retrieve(ctx, q, channels=channels, cand_max=m["cand_max"],
+                                   per_vid=m["per_video"], route=m.get("route", False))
     if not candidates:
         return {"q": q, "empty": True, "answer": None, "candidates": [], "cited": [], "queries": queries,
                 "coverage": {"moments": 0, "videos": 0, "channels": 0}, "usd": 0.0}
@@ -3970,7 +4020,8 @@ def answer_question_stream(ctx, q, channels=None, mode=None):
     when nothing matched. Same retrieval and map-reduce as answer_question; only the final write streams."""
     m = MODES.get(mode or DEFAULT_MODE, MODES[DEFAULT_MODE])
     yield ("status", "searching")
-    candidates, _ = retrieve(ctx, q, channels=channels, cand_max=m["cand_max"], per_vid=m["per_video"])
+    candidates, _ = retrieve(ctx, q, channels=channels, cand_max=m["cand_max"],
+                             per_vid=m["per_video"], route=m.get("route", False))
     if not candidates:
         yield ("empty", None)
         return
