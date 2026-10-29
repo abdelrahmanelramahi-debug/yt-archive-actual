@@ -23,7 +23,11 @@ Deliberate design choices — do NOT "fix" these:
 - **Data integrity:** atomic writes (tmp file + `os.replace`, see `write_json`), defensive reads (`read_obj`/`read_list`), no silent data loss, consistent on-disk schemas.
 - **Correctness:** edge cases, error handling that doesn't swallow real failures, resource cleanup (close files / SQLite connections), no races in the parallel download/index/map paths.
 - **Security:** never log or commit secrets (keep `_SECRET_ENV` and `.gitignore` honest); validate external input; keep SQL parameterized; no `shell=True` / `eval` / `pickle` of untrusted data; constant-time compares for auth secrets; least privilege on tokens (e.g. the fine-grained `GITHUB_TOKEN`).
-- **Clarity & efficiency:** clear names, remove dead code, avoid needless O(n^2) or repeated work — but do not micro-optimize, over-abstract, or add types/docstrings just to add them.
+- **Phantom code:** delete dead/unreachable code, unused imports/variables/functions, commented-out blocks, and stale TODOs. If nothing uses it, it goes.
+- **Redundancy:** fold genuine copy-paste into a shared helper where it actually clarifies — but do not over-DRY or abstract prematurely.
+- **Readability & organization:** clear names, related functions grouped together, style consistent with the surrounding code, comments that match the code. Keep related things near each other within the single file.
+- **Editability:** leave it easy for the next person to change — no hidden coupling, no clever one-liners that hide intent.
+- **Efficiency:** avoid needless O(n^2) or repeated work, but do not micro-optimize or add typing/docstring ceremony just to add it.
 
 ## Scope by mode
 

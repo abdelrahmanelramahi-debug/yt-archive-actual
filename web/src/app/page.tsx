@@ -31,10 +31,9 @@ const AED_PER_USD = 3.6725; // fixed USD peg
 const aed = (usd: number) => `AED ${(usd * AED_PER_USD).toFixed(2)}`;
 
 const EXAMPLES = [
-  "What are the conditions for a valid wudu?",
-  "How do the scholars respond to the trinity?",
-  "What is said about patience during hardship?",
-  "Explain tawheed al-uluhiyyah simply.",
+  "What is the correct belief about Allah's names and attributes?", // broad (aqeedah)
+  "Is wudu valid with seawater?", // niche (fiqh) - serendipity
+  'How do the scholars respond to John 1:1, "the Word was God"?', // niche (christian polemic)
 ];
 
 const STAGES = [
@@ -294,7 +293,7 @@ function ChannelPicker({
         </svg>
       </button>
       {open && (
-        <div className="absolute left-0 z-30 mt-1.5 max-h-80 w-72 overflow-auto rounded-xl border border-line bg-raised p-1.5 shadow-[0_16px_40px_-16px_rgba(35,33,27,0.4)]">
+        <div className="absolute bottom-full left-0 z-30 mb-1.5 max-h-80 w-72 overflow-auto rounded-xl border border-line bg-raised p-1.5 shadow-[0_-16px_40px_-16px_rgba(35,33,27,0.4)]">
           <div className="flex items-center justify-between px-2 py-1 text-xs">
             <button type="button" className="font-medium text-accent hover:underline" onClick={() => onChange(new Set(channels.map((c) => c.slug)))}>
               Select all
@@ -482,7 +481,7 @@ export default function Home() {
   }
 
   return (
-    <main className="mx-auto w-full max-w-3xl px-5 pb-28">
+    <main className={`mx-auto w-full max-w-3xl px-5 ${landing ? "pb-10" : "pb-28"}`}>
       {/* header: identity + persistent cost */}
       <header className="flex items-center justify-between py-6">
         <Wordmark />
@@ -490,7 +489,7 @@ export default function Home() {
       </header>
 
       {/* hero + suggestions + ask */}
-      <section className={landing ? "pt-6" : "pt-5"}>
+      <section className={landing ? "flex min-h-[calc(100dvh-7rem)] flex-col pt-6" : "pt-5"}>
         {landing && (
           <div className="fade-up mb-8">
             <h1 className="max-w-2xl text-balance font-serif text-[2.1rem] font-medium leading-[1.12] tracking-tight text-ink sm:text-[2.7rem]">
@@ -511,8 +510,8 @@ export default function Home() {
           </div>
         )}
 
-        {/* everything after the hero sits lower down the page on landing (desktop) */}
-        <div className={landing ? "mt-8 sm:mt-[16vh]" : ""}>
+        {/* everything after the hero is anchored to the bottom on landing */}
+        <div className={landing ? "mt-auto" : ""}>
           {/* suggestions */}
           {landing && (
             <div className="fade-up mb-4">
