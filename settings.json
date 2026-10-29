@@ -51,7 +51,7 @@
     {
       "handle": "@قناة_فتاوى_الإسلامية",
       "slug": "qnah_ftawa_alislamyh",
-      "name": "قناة فتاوى الإسلامية",
+      "name": "Fatawa Islamiyya",
       "language": "ar",
       "videos": true,
       "lives": false,
@@ -67,7 +67,7 @@
     {
       "handle": "@webkalelm",
       "slug": "webkalelm",
-      "name": "كنوز العلم",
+      "name": "Kunuz al-Ilm",
       "language": "ar",
       "videos": true,
       "lives": true,
@@ -83,7 +83,7 @@
     {
       "handle": "@azizfrhaan",
       "slug": "azizfrhaan",
-      "name": "Dr. Aziz Bin Farhan | د. عزيز بن فرحان ",
+      "name": "Dr. Aziz Bin Farhan",
       "language": "ar",
       "videos": true,
       "lives": true,
@@ -99,7 +99,7 @@
     {
       "handle": "@ALUthaymeen",
       "slug": "ALUthaymeen",
-      "name": "فضيلة الشيخ محمد بن صالح العثيمين",
+      "name": "Shaykh Ibn Uthaymeen",
       "language": "ar",
       "videos": true,
       "lives": false,
@@ -115,7 +115,7 @@
     {
       "handle": "@Alsheikhbinbaz",
       "slug": "Alsheikhbinbaz",
-      "name": "فضيلة الشيخ ابن باز Alsheikh Binbaz",
+      "name": "Shaykh Ibn Baz",
       "language": "ar",
       "videos": true,
       "lives": false,
@@ -131,7 +131,7 @@
     {
       "handle": "@dralfawzann",
       "slug": "dralfawzann",
-      "name": "العلامة الدكتور صالح الفوزان",
+      "name": "Shaykh Salih al-Fawzan",
       "language": "ar",
       "videos": true,
       "lives": false,
@@ -148,7 +148,7 @@
     {
       "handle": "@sheikhalbadr",
       "slug": "sheikhalbadr",
-      "name": "الشيخ عبد الرزاق البدر - sheikhalbadr",
+      "name": "Shaykh Abdur-Razzaq al-Badr",
       "language": "ar",
       "videos": true,
       "lives": false,
@@ -164,7 +164,7 @@
     {
       "handle": "@alosyme",
       "slug": "alosyme",
-      "name": "صالح العصيمي Saleh alOsaimi",
+      "name": "Shaykh Salih al-Osaimi",
       "language": "ar",
       "videos": true,
       "lives": true,
@@ -180,7 +180,7 @@
     {
       "handle": "@alshuwayer9",
       "slug": "alshuwayer9",
-      "name": "تراث الشيخ عبد السلام الشويعر",
+      "name": "Shaykh Abdus-Salam al-Shuwayer",
       "language": "ar",
       "videos": true,
       "lives": true,
@@ -292,7 +292,7 @@
     {
       "handle": "@AlsaeedanTV",
       "slug": "AlsaeedanTV",
-      "name": "محبي الشيخ وليد السعيدان",
+      "name": "Shaykh Walid al-Saeedan",
       "language": "ar",
       "videos": true,
       "lives": true,
