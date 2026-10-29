@@ -192,7 +192,7 @@ def fmt_eta(sec):
     return f"~{sec // 3600} h {sec % 3600 // 60} min left"
 
 
-_SECRET_ENV = ("APIFY_TOKEN", "ANTHROPIC_API_KEY", "YOUTUBE_API_KEY")
+_SECRET_ENV = ("APIFY_TOKEN", "ANTHROPIC_API_KEY", "YOUTUBE_API_KEY", "GITHUB_TOKEN", "BRAIN_KEY")
 
 
 def _redact(text):

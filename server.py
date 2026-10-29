@@ -11,6 +11,7 @@ Only the frontend should call this. Set BRAIN_KEY in the environment and send it
 `X-Brain-Key` header; with no BRAIN_KEY set (local dev) requests are open. API keys live only here
 (read from .env by app.py), never in the frontend or the browser.
 """
+import hmac
 import os
 import threading
 import time
@@ -71,7 +72,8 @@ app.add_middleware(CORSMiddleware, allow_origins=ALLOW_ORIGINS,
 
 
 def _check_key(x_brain_key):
-    if BRAIN_KEY and x_brain_key != BRAIN_KEY:
+    # constant-time compare so the key can't be guessed from response timing
+    if BRAIN_KEY and not hmac.compare_digest(x_brain_key or "", BRAIN_KEY):
         raise HTTPException(status_code=401, detail="bad or missing X-Brain-Key")
 
 
