@@ -471,7 +471,6 @@ export default function Home() {
   }
 
   const landing = status === "idle";
-  const allSelected = channels.length === 0 || selected.size === channels.length;
   const noneSelected = channels.length > 0 && selected.size === 0;
   const modeUsd = modes.find((m) => m.id === mode)?.usd ?? TYPICAL_COST;
 
@@ -512,81 +511,82 @@ export default function Home() {
           </div>
         )}
 
-        {/* suggestions, above the ask bar on landing */}
-        {landing && (
-          <div className="fade-up mb-4">
-            <p className="mb-2.5 text-xs text-faint">Try one of these</p>
-            <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-              {EXAMPLES.map((ex) => (
-                <button
-                  key={ex}
-                  onClick={() => {
-                    setQ(ex);
-                    ask(ex);
-                  }}
-                  className="rounded-lg border border-line bg-raised/60 px-3.5 py-2 text-left text-[13.5px] text-muted transition hover:border-line2 hover:text-ink"
-                >
-                  {ex}
-                </button>
-              ))}
+        {/* everything after the hero sits lower down the page on landing (desktop) */}
+        <div className={landing ? "mt-8 sm:mt-[16vh]" : ""}>
+          {/* suggestions */}
+          {landing && (
+            <div className="fade-up mb-4">
+              <p className="mb-2.5 text-xs text-faint">Try one of these</p>
+              <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
+                {EXAMPLES.map((ex) => (
+                  <button
+                    key={ex}
+                    onClick={() => {
+                      setQ(ex);
+                      ask(ex);
+                    }}
+                    className="rounded-lg border border-line bg-raised/60 px-3.5 py-2 text-left text-[13.5px] text-muted transition hover:border-line2 hover:text-ink"
+                  >
+                    {ex}
+                  </button>
+                ))}
+              </div>
             </div>
-          </div>
-        )}
+          )}
 
-        {/* ask bar */}
-        <form onSubmit={onSubmit} className="sticky top-3 z-10">
-          <div className="group flex items-end gap-2 rounded-2xl border border-line bg-raised/90 p-2 pl-4 shadow-[0_2px_8px_rgba(35,33,27,0.04),0_14px_40px_-20px_rgba(35,33,27,0.25)] backdrop-blur transition focus-within:border-accent focus-within:shadow-[0_2px_8px_rgba(15,107,87,0.06),0_14px_40px_-18px_rgba(15,107,87,0.3)]">
-            <textarea
-              ref={inputRef}
-              value={q}
-              onChange={(e) => setQ(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === "Enter" && !e.shiftKey) {
-                  e.preventDefault();
-                  ask(q);
-                }
-              }}
-              rows={1}
-              dir="auto"
-              placeholder="Ask anything…  (English or Arabic)"
-              /* 16px keeps iOS Safari from auto-zooming when the field is focused */
-              className="max-h-40 flex-1 resize-none bg-transparent py-2 text-[16px] leading-relaxed text-ink outline-none placeholder:text-faint"
-            />
-            <button
-              type="submit"
-              disabled={!q.trim() || status === "loading" || noneSelected}
-              aria-label="Ask"
-              className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent text-paper transition enabled:hover:bg-accent2 disabled:opacity-30"
-            >
-              <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden>
-                <path d="M12 19V5M12 5l-6 6M12 5l6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
-              </svg>
-            </button>
-          </div>
-        </form>
+          {/* controls ABOVE the bar: scope / cost on top, the pickers sit right above the bar */}
+          {channels.length > 0 && (
+            <div className="mb-3 flex flex-col gap-4 sm:flex-row sm:items-end sm:justify-between sm:gap-3">
+              <div className="flex flex-col items-start gap-1.5">
+                {noneSelected ? (
+                  <p className="text-[13px] text-danger">Pick at least one channel.</p>
+                ) : (
+                  <p className="text-[13px] text-faint">
+                    {selected.size} channel{selected.size === 1 ? "" : "s"}
+                  </p>
+                )}
+                <ChannelPicker channels={channels} selected={selected} onChange={setSelected} />
+              </div>
+              <div className="flex flex-col items-start gap-1.5 sm:items-end">
+                <ModeExplainer modes={modes} />
+                <p className="text-[13px] text-gold2">≈ {aed(modeUsd)} per answer</p>
+                <ModePicker modes={modes} mode={mode} onChange={setMode} />
+              </div>
+            </div>
+          )}
 
-        {/* channel picker + its live scope (left); mode picker + its cost + explainer (right) */}
-        {channels.length > 0 && (
-          <div className="mt-4 flex flex-col gap-4 sm:flex-row sm:items-start sm:justify-between sm:gap-3">
-            <div className="flex flex-col items-start gap-1.5">
-              <ChannelPicker channels={channels} selected={selected} onChange={setSelected} />
-              {noneSelected ? (
-                <p className="text-[13px] text-danger">Pick at least one channel.</p>
-              ) : (
-                <p className="text-[13px] text-faint">
-                  {allSelected
-                    ? `all ${channels.length || 19} channels`
-                    : `${selected.size} of ${channels.length} channels`}
-                </p>
-              )}
+          {/* ask bar */}
+          <form onSubmit={onSubmit}>
+            <div className="group flex items-end gap-2 rounded-2xl border border-line bg-raised/90 p-2 pl-4 shadow-[0_2px_8px_rgba(35,33,27,0.04),0_14px_40px_-20px_rgba(35,33,27,0.25)] backdrop-blur transition focus-within:border-accent focus-within:shadow-[0_2px_8px_rgba(15,107,87,0.06),0_14px_40px_-18px_rgba(15,107,87,0.3)]">
+              <textarea
+                ref={inputRef}
+                value={q}
+                onChange={(e) => setQ(e.target.value)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" && !e.shiftKey) {
+                    e.preventDefault();
+                    ask(q);
+                  }
+                }}
+                rows={1}
+                dir="auto"
+                placeholder="Ask anything…  (English or Arabic)"
+                /* 16px keeps iOS Safari from auto-zooming when the field is focused */
+                className="max-h-40 flex-1 resize-none bg-transparent py-2 text-[16px] leading-relaxed text-ink outline-none placeholder:text-faint"
+              />
+              <button
+                type="submit"
+                disabled={!q.trim() || status === "loading" || noneSelected}
+                aria-label="Ask"
+                className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent text-paper transition enabled:hover:bg-accent2 disabled:opacity-30"
+              >
+                <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden>
+                  <path d="M12 19V5M12 5l-6 6M12 5l6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
             </div>
-            <div className="flex flex-col items-start gap-1.5 sm:items-end">
-              <ModePicker modes={modes} mode={mode} onChange={setMode} />
-              <p className="text-[13px] text-gold2">≈ {aed(modeUsd)} per answer</p>
-              <ModeExplainer modes={modes} />
-            </div>
-          </div>
-        )}
+          </form>
+        </div>
 
       </section>
 
