@@ -160,6 +160,8 @@ const DICT: Record<Lang, Record<string, string>> = {
     "admin.defaultCapLabel": "Default daily limit (everyone):",
     "whatsnew.polish.t": "More small fixes",
     "whatsnew.polish.b": "Saved answers keep their style, deleting a chat is easier on mobile, and you can Select or Deselect all channels in one tap.",
+    "whatsnew.bugfix.t": "Bug fixes",
+    "whatsnew.bugfix.b": "Small fixes and tidying behind the scenes.",
   },
   ar: {
     "hero.title": "اسأل عبر الأرشيف",
@@ -314,6 +316,8 @@ const DICT: Record<Lang, Record<string, string>> = {
     "admin.defaultCapLabel": "الحد اليومي الافتراضي (للجميع):",
     "whatsnew.polish.t": "إصلاحات صغيرة أخرى",
     "whatsnew.polish.b": "تحتفظ الإجابات المحفوظة بنمطها، وحذف المحادثة أسهل على الجوال، ويمكنك تحديد كل القنوات أو إلغاء تحديدها بنقرة واحدة.",
+    "whatsnew.bugfix.t": "إصلاحات",
+    "whatsnew.bugfix.b": "إصلاحات صغيرة وتحسينات خلف الكواليس.",
   },
 };
 

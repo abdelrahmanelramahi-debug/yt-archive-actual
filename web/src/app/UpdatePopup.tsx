@@ -50,6 +50,12 @@ const Fixes = (
 // entries stay as flip-back pages. The id of the top entry is what "seen" is tracked against.
 const UPDATES: { id: string; items: { key: string; icon: ReactNode }[] }[] = [
   {
+    id: "2026-10-30f",
+    items: [
+      { key: "bugfix", icon: Fixes },
+    ],
+  },
+  {
     id: "2026-10-30e",
     items: [
       { key: "polish", icon: Fixes },
@@ -90,12 +96,33 @@ export default function UpdatePopup() {
   const { t, dir } = useLang();
   const [open, setOpen] = useState(false);
   const [page, setPage] = useState(0);
+  // only the entries newer than the one this person last acknowledged (newest-first)
+  const [toShow, setToShow] = useState<typeof UPDATES>([]);
 
   useEffect(() => {
+    let seen: string | null = null;
     try {
-      if (localStorage.getItem("seenUpdate") !== LATEST_ID) setOpen(true);
+      seen = localStorage.getItem("seenUpdate");
     } catch {
-      /* ignore */
+      return; // storage blocked: don't pop up at all rather than replay everything
+    }
+    if (!seen) {
+      // brand-new visitor: nothing here is "new" to them, so show nothing — just mark where they
+      // start, so only entries shipped AFTER this first visit ever pop up for them.
+      try {
+        localStorage.setItem("seenUpdate", LATEST_ID);
+      } catch {
+        /* ignore */
+      }
+      return;
+    }
+    if (seen === LATEST_ID) return; // already up to date
+    const idx = UPDATES.findIndex((u) => u.id === seen);
+    // entries newer than the last-seen one; if that id is gone, just show the newest one
+    const unseen = idx === -1 ? UPDATES.slice(0, 1) : UPDATES.slice(0, idx);
+    if (unseen.length) {
+      setToShow(unseen);
+      setOpen(true);
     }
   }, []);
 
@@ -109,7 +136,7 @@ export default function UpdatePopup() {
   }
 
   if (!open) return null;
-  const multi = UPDATES.length > 1;
+  const multi = toShow.length > 1;
 
   return (
     <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" role="dialog" aria-modal>
@@ -131,7 +158,7 @@ export default function UpdatePopup() {
             className="flex transition-transform duration-300 ease-[cubic-bezier(0.2,0.7,0.2,1)]"
             style={{ transform: `translateX(-${page * 100}%)` }}
           >
-            {UPDATES.map((u) => (
+            {toShow.map((u) => (
               <ul key={u.id} dir={dir} className="w-full shrink-0 list-none space-y-4 px-6">
                 {u.items.map((it) => (
                   <li key={it.key} className="flex items-start gap-3">
@@ -161,7 +188,7 @@ export default function UpdatePopup() {
               </svg>
             </button>
             <div className="flex items-center gap-1.5">
-              {UPDATES.map((u, i) => (
+              {toShow.map((u, i) => (
                 <button
                   key={u.id}
                   type="button"
@@ -173,8 +200,8 @@ export default function UpdatePopup() {
             </div>
             <button
               type="button"
-              onClick={() => setPage((p) => Math.min(UPDATES.length - 1, p + 1))}
-              disabled={page === UPDATES.length - 1}
+              onClick={() => setPage((p) => Math.min(toShow.length - 1, p + 1))}
+              disabled={page === toShow.length - 1}
               aria-label="Older update"
               className="rounded-md p-1 text-faint transition enabled:hover:text-ink disabled:opacity-25"
             >
