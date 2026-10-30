@@ -149,6 +149,7 @@ class AskRequest(BaseModel):
     channels: list[str] | None = None  # slugs to limit the search to; None/empty = all
     mode: str | None = None            # quick | standard | deep
     style: str | None = None           # topical (default) | verbatim
+    channel_names: dict[str, dict[str, str]] | None = None  # slug -> {en, ar} admin name overrides
 
 
 def _sse(event, data):
@@ -174,7 +175,7 @@ def ask_stream(req: AskRequest, request: Request, x_brain_key: str = Header(None
 
     def gen():
         try:
-            for kind, payload in brain.answer_question_stream(ctx, q, channels=req.channels, mode=req.mode, style=req.style):
+            for kind, payload in brain.answer_question_stream(ctx, q, channels=req.channels, mode=req.mode, style=req.style, channel_names=req.channel_names):
                 if kind == "status":
                     yield _sse("status", {"stage": payload})
                 elif kind == "delta":
@@ -211,7 +212,7 @@ def ask(req: AskRequest, request: Request, x_brain_key: str = Header(None),
     if blocked:
         raise HTTPException(status_code=429, detail=blocked)
     try:
-        res = brain.answer_question(ctx, q, channels=req.channels, mode=req.mode, style=req.style)
+        res = brain.answer_question(ctx, q, channels=req.channels, mode=req.mode, style=req.style, channel_names=req.channel_names)
     except Exception as e:
         msg = str(e).lower()
         if "credit" in msg or "billing" in msg:

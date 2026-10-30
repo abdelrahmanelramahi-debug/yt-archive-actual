@@ -4046,27 +4046,51 @@ def synthesize(ctx, q, candidates, style=None):
                          "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}}
 
 
-def answer_question(ctx, q, channels=None, mode=None, style=None):
+def _apply_channel_names(ctx, q, candidates, channel_names):
+    """Return the candidates with their display 'channel' replaced by an admin name override, in the
+    question's language. channel_names is {slug: {"en":.., "ar":..}} sent by the web (from Firestore);
+    the terminal-set names stay the fallback. Candidates are COPIED so the shared in-memory chunks are
+    never mutated (the override is per-request). Applying it here lets the override flow through the
+    excerpt headers, the findings, the verbatim grouping and the source cards with no further plumbing."""
+    if not channel_names:
+        return candidates
+    ar = bool(re.search(r"[؀-ۿ]", q))  # the answer follows the question's language
+    override = {}
+    for ch in ctx["scope"]:
+        o = channel_names.get(ch["slug"])
+        if not o:
+            continue
+        name = (o.get("ar") if ar else o.get("en")) or o.get("en") or o.get("ar")
+        if name and name != full_name(ch):
+            override[full_name(ch)] = name
+    if not override:
+        return candidates
+    return [{**c, "channel": override.get(c.get("channel"), c.get("channel"))} for c in candidates]
+
+
+def answer_question(ctx, q, channels=None, mode=None, style=None, channel_names=None):
     """Retrieve + synthesize in one call: the whole deluxe answer as plain data (empty=True if nothing
     matched). `channels` (slugs) limits the search; `mode` (quick/standard/deep) sets the depth;
-    `style` (topical/verbatim) sets how the answer is written. No printing or file I/O - the CLI and
-    the web server format and persist it themselves."""
+    `style` (topical/verbatim) sets how the answer is written; `channel_names` (slug -> {en, ar}) is the
+    admin name override. No printing or file I/O - the CLI and the web server format and persist it."""
     m = MODES.get(mode or DEFAULT_MODE, MODES[DEFAULT_MODE])
     candidates, queries = retrieve(ctx, q, channels=channels, cand_max=m["cand_max"],
                                    per_vid=m["per_video"], route=m.get("route", False))
     if not candidates:
         return {"q": q, "empty": True, "answer": None, "candidates": [], "cited": [], "queries": queries,
                 "coverage": {"moments": 0, "videos": 0, "channels": 0}, "usd": 0.0}
+    candidates = _apply_channel_names(ctx, q, candidates, channel_names)
     res = synthesize(ctx, q, candidates, style)
     return {"q": q, "empty": False, "candidates": candidates, "queries": queries, **res}
 
 
-def answer_question_stream(ctx, q, channels=None, mode=None, style=None):
+def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel_names=None):
     """Streaming deluxe answer: a generator of (kind, payload) events for the website's live answer.
     Yields ('status', stage) as it searches then reads, many ('delta', text) as the answer writes,
     then one ('done', {...}) with the final answer, candidates and cited numbers - or ('empty', None)
-    when nothing matched. `style` (topical/verbatim) sets how the answer is written. Same retrieval and
-    map-reduce as answer_question; only the final write streams."""
+    when nothing matched. `style` (topical/verbatim) sets how the answer is written; `channel_names`
+    (slug -> {en, ar}) applies the admin name override. Same retrieval and map-reduce as
+    answer_question; only the final write streams."""
     m = MODES.get(mode or DEFAULT_MODE, MODES[DEFAULT_MODE])
     yield ("status", "searching")
     candidates, _ = retrieve(ctx, q, channels=channels, cand_max=m["cand_max"],
@@ -4074,6 +4098,7 @@ def answer_question_stream(ctx, q, channels=None, mode=None, style=None):
     if not candidates:
         yield ("empty", None)
         return
+    candidates = _apply_channel_names(ctx, q, candidates, channel_names)
     yield ("status", "reading")
     findings, map_cost = _map_findings(ctx["anth"], ctx["settings"], q, candidates)
     yield ("status", "writing")
