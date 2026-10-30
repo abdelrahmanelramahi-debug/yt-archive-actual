@@ -1,8 +1,9 @@
 import type { Metadata, Viewport } from "next";
-import { Inter, Fraunces } from "next/font/google";
+import { Inter, Fraunces, IBM_Plex_Sans_Arabic } from "next/font/google";
 import Script from "next/script";
 import "./globals.css";
 import { AuthProvider } from "../lib/auth";
+import { LangProvider } from "../lib/i18n";
 
 const inter = Inter({ subsets: ["latin"], variable: "--font-inter", display: "swap" });
 
@@ -12,6 +13,14 @@ const fraunces = Fraunces({
   variable: "--font-fraunces",
   display: "swap",
   axes: ["opsz", "SOFT"],
+});
+
+// Arabic face for the Arabic interface (Latin stays Inter/Fraunces; Arabic glyphs fall to this).
+const plexArabic = IBM_Plex_Sans_Arabic({
+  subsets: ["arabic"],
+  weight: ["400", "500", "600"],
+  variable: "--font-arabic",
+  display: "swap",
 });
 
 export const metadata: Metadata = {
@@ -35,12 +44,19 @@ export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   // Set the theme before paint so there's no flash of the wrong colours. Default follows the OS.
-  const themeInit = `(function(){try{var c=localStorage.getItem('theme')||'system';var t=c==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):c;var e=document.documentElement;e.setAttribute('data-theme',t);e.setAttribute('data-theme-choice',c);var m=document.querySelector('meta[name=theme-color]');if(m)m.setAttribute('content',t==='dark'?'#16150f':'#fafaf8');}catch(e){document.documentElement.setAttribute('data-theme','light');}})();`;
+  const themeInit = `(function(){try{var c=localStorage.getItem('theme')||'system';var t=c==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):c;var e=document.documentElement;e.setAttribute('data-theme',t);e.setAttribute('data-theme-choice',c);var m=document.querySelector('meta[name=theme-color]');if(m)m.setAttribute('content',t==='dark'?'#16150f':'#fafaf8');var l=localStorage.getItem('lang');if(l==='ar'){e.setAttribute('lang','ar');e.setAttribute('dir','rtl');}}catch(e){document.documentElement.setAttribute('data-theme','light');}})();`;
   return (
-    <html lang="en" className={`${inter.variable} ${fraunces.variable}`} data-theme="light" suppressHydrationWarning>
+    <html
+      lang="en"
+      className={`${inter.variable} ${fraunces.variable} ${plexArabic.variable}`}
+      data-theme="light"
+      suppressHydrationWarning
+    >
       <body>
         <Script id="theme-init" strategy="beforeInteractive" dangerouslySetInnerHTML={{ __html: themeInit }} />
-        <AuthProvider>{children}</AuthProvider>
+        <LangProvider>
+          <AuthProvider>{children}</AuthProvider>
+        </LangProvider>
       </body>
     </html>
   );

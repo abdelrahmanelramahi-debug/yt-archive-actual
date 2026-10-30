@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy, limit, serverTimestamp } from "firebase/firestore";
 import { useAuth, signOutUser, idToken } from "../lib/auth";
+import { useLang, LangToggle } from "../lib/i18n";
 import { db } from "../lib/firebase";
 import SignIn from "./SignIn";
 
@@ -57,18 +58,10 @@ function heroMoments(n: number): string {
   return n.toLocaleString();
 }
 
-const EXAMPLES = [
-  "What is the correct belief about Allah's names and attributes?", // broad (aqeedah)
-  "Is wudu valid with seawater?", // niche (fiqh) - serendipity
-  'How do the scholars respond to John 1:1, "the Word was God"?', // niche (christian polemic)
-];
+// keys into the i18n dictionary — the shown + asked text follows the interface language
+const EX_KEYS = ["ex.1", "ex.2", "ex.3"];
 
-const STAGES = [
-  "Breaking your question into angles",
-  "Searching a million moments",
-  "Reading the most relevant ones",
-  "Writing a grounded answer",
-];
+const STAGE_KEYS = ["stage.1", "stage.2", "stage.3", "stage.4"];
 // map the brain's streaming status events onto the stage copy above
 const STAGE_IDX: Record<string, number> = { searching: 1, reading: 2, writing: 3 };
 
@@ -438,6 +431,7 @@ export default function Home() {
   const [stage, setStage] = useState(0);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const { user, loading: authLoading } = useAuth();
+  const { t } = useLang();
   const [usedToday, setUsedToday] = useState(0);
   const [dailyCap, setDailyCap] = useState(DAILY_CAP); // per-account; an admin can raise it
   const [channels, setChannels] = useState<Channel[]>([]);
@@ -599,7 +593,7 @@ export default function Home() {
   useEffect(() => {
     if (status !== "loading" || live) return;
     setStage(0);
-    const id = setInterval(() => setStage((s) => Math.min(s + 1, STAGES.length - 1)), 2600);
+    const id = setInterval(() => setStage((s) => Math.min(s + 1, STAGE_KEYS.length - 1)), 2600);
     return () => clearInterval(id);
   }, [status, live]);
 
@@ -616,7 +610,7 @@ export default function Home() {
     setReturnY(null);
     const token = await idToken();
     if (!token) {
-      setError("Please sign in again.");
+      setError(t("err.signInAgain"));
       setStatus("error");
       return;
     }
@@ -640,7 +634,7 @@ export default function Home() {
       });
       const data: Answer = await r.json();
       if (!r.ok || data.error) {
-        setError(data.error || "Something went wrong.");
+        setError(data.error || t("err.generic"));
         setStatus("error");
         return;
       }
@@ -649,7 +643,7 @@ export default function Home() {
       setCurrentChatId(null);
       saveChat(text, data.answer, data.sources || [], data.coverage, data.cost_usd);
     } catch {
-      setError("Could not reach the server.");
+      setError(t("err.server"));
       setStatus("error");
     }
   }
@@ -667,7 +661,7 @@ export default function Home() {
       // (sign-in, daily cap, brain error) is shown directly, so it isn't retried and double-counted.
       if (r.status && r.status !== 404 && r.status !== 405) {
         const data = await r.json().catch(() => ({}));
-        setError((data as { error?: string }).error || "Something went wrong.");
+        setError((data as { error?: string }).error || t("err.generic"));
         setStatus("error");
         setLive(false);
         return;
@@ -737,7 +731,7 @@ export default function Home() {
         } else if (ev === "error") {
           if (gotDelta) {
             // answer already started showing — surface the error rather than silently re-running
-            setError(obj.error || "Something went wrong.");
+            setError(obj.error || t("err.generic"));
             setStatus("error");
             setLive(false);
             return;
@@ -825,14 +819,14 @@ export default function Home() {
         onOpenAdmin={() => setAdminOpen(true)}
       />
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
-      <div className={`transition-[margin] duration-200 ${sidebarOpen ? "sm:ml-[264px]" : ""}`}>
+      <div className={`transition-[margin] duration-200 ${sidebarOpen ? "ltr:sm:ml-[264px] rtl:sm:mr-[264px]" : ""}`}>
         <main className={`mx-auto w-full max-w-3xl px-5 ${landing ? "pb-10" : "pb-28"}`}>
           {/* top bar: open the sidebar (always on phones; on desktop only when it's collapsed) */}
           <div className="flex items-center gap-1 py-4 sm:py-5">
             <button
               type="button"
               onClick={() => setSidebarOpen(true)}
-              aria-label="Open menu"
+              aria-label={t("aria.openMenu")}
               className={`-ml-1 rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink ${sidebarOpen ? "sm:hidden" : ""}`}
             >
               <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
@@ -842,26 +836,27 @@ export default function Home() {
             <button type="button" onClick={newChat} aria-label="La Tafti" className="rounded-md p-1 transition hover:opacity-75 sm:hidden">
               <Wordmark />
             </button>
+            <div className="ms-auto">
+              <LangToggle />
+            </div>
           </div>
 
           {/* hero + suggestions + ask (ask block anchored to the bottom of the viewport on landing) */}
       <section className={landing ? "flex min-h-[calc(100dvh-6rem)] flex-col pt-6" : "pt-5"}>
         {landing && (
           <div className="fade-up mb-6 sm:mb-8">
-            <h1 className="max-w-2xl text-balance font-serif text-[1.6rem] font-medium leading-[1.14] tracking-tight text-ink sm:text-[2.7rem] sm:leading-[1.12]">
-              Ask across the archive
+            <h1 dir="auto" className="max-w-2xl text-balance font-serif text-[1.6rem] font-medium leading-[1.14] tracking-tight text-ink sm:text-[2.7rem] sm:leading-[1.12]">
+              {t("hero.title")}
             </h1>
-            <p className="mt-3 max-w-xl text-[14px] leading-relaxed text-muted sm:mt-4 sm:text-[16px]">
-              Not a fatwa — the words of the scholars themselves, drawn from thousands of hours of
-              lectures and debates and traced to the exact moment they were said, with a timestamp
-              you can open on the video.
+            <p dir="auto" className="mt-3 max-w-xl text-[14px] leading-relaxed text-muted sm:mt-4 sm:text-[16px]">
+              {t("hero.subtitle")}
             </p>
             <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-3 sm:mt-7 sm:gap-x-10 sm:gap-y-4">
-              <Stat n={totals ? heroVideos(totals.videos) : "20,000+"} label="videos" />
+              <Stat n={totals ? heroVideos(totals.videos) : "20,000+"} label={t("hero.videos")} />
               <span className="hidden h-10 w-px bg-line sm:block" />
-              <Stat n={totals ? heroMoments(totals.moments) : "1.1M+"} label="searchable moments" />
+              <Stat n={totals ? heroMoments(totals.moments) : "1.1M+"} label={t("hero.moments")} />
               <span className="hidden h-10 w-px bg-line sm:block" />
-              <Stat n={String(channels.length || 19)} label="channels" />
+              <Stat n={String(channels.length || 19)} label={t("hero.channels")} />
             </div>
           </div>
         )}
@@ -871,20 +866,24 @@ export default function Home() {
           {/* suggestions */}
           {landing && (
             <div className="fade-up mb-5">
-              <p className="mb-2.5 text-xs text-faint">Try one of these</p>
+              <p className="mb-2.5 text-xs text-faint">{t("hero.try")}</p>
               <div className="flex flex-col gap-2 sm:flex-row sm:flex-wrap">
-                {EXAMPLES.map((ex) => (
-                  <button
-                    key={ex}
-                    onClick={() => {
-                      setQ(ex);
-                      ask(ex);
-                    }}
-                    className="rounded-lg border border-line bg-raised/60 px-3.5 py-2 text-left text-[13.5px] text-muted transition hover:border-line2 hover:text-ink"
-                  >
-                    {ex}
-                  </button>
-                ))}
+                {EX_KEYS.map((k) => {
+                  const ex = t(k);
+                  return (
+                    <button
+                      key={k}
+                      dir="auto"
+                      onClick={() => {
+                        setQ(ex);
+                        ask(ex);
+                      }}
+                      className="rounded-lg border border-line bg-raised/60 px-3.5 py-2 text-start text-[13.5px] text-muted transition hover:border-line2 hover:text-ink"
+                    >
+                      {ex}
+                    </button>
+                  );
+                })}
               </div>
             </div>
           )}
@@ -896,24 +895,24 @@ export default function Home() {
               <div className="mb-4 flex items-center justify-end gap-2 sm:hidden">
                 <ChannelPicker channels={channels} selected={selected} onChange={setSelected} compact />
                 <ModeDropup modes={modes} mode={mode} onChange={setMode} />
-                {noneSelected && <span className="text-[13px] text-danger">Pick a channel</span>}
+                {noneSelected && <span className="text-[13px] text-danger">{t("controls.pickChannel")}</span>}
               </div>
 
               {/* desktop: channel + scope (left); mode + cost + explainer (right) */}
               <div className="mb-3 hidden sm:flex sm:flex-row sm:items-end sm:justify-between sm:gap-3">
                 <div className="flex flex-col items-start gap-2">
                   {noneSelected ? (
-                    <p className="text-[13px] text-danger">Pick at least one channel.</p>
+                    <p className="text-[13px] text-danger">{t("controls.pickOne")}</p>
                   ) : (
                     <p className="text-[13px] text-faint">
-                      {selected.size} channel{selected.size === 1 ? "" : "s"}
+                      {t("controls.channelCount", { n: selected.size, s: selected.size === 1 ? "" : "s" })}
                     </p>
                   )}
                   <ChannelPicker channels={channels} selected={selected} onChange={setSelected} />
                 </div>
                 <div className="flex flex-col items-end gap-2">
                   <ModeExplainer modes={modes} />
-                  <p className="text-[13px] text-gold2">≈ {aed(modeUsd)} per answer</p>
+                  <p className="text-[13px] text-gold2">{t("controls.perAnswer", { price: aed(modeUsd) })}</p>
                   <ModePicker modes={modes} mode={mode} onChange={setMode} />
                 </div>
               </div>
@@ -935,14 +934,14 @@ export default function Home() {
                 }}
                 rows={1}
                 dir="auto"
-                placeholder="Ask anything…  (English or Arabic)"
+                placeholder={t("ask.placeholder")}
                 /* 16px keeps iOS Safari from auto-zooming when the field is focused */
                 className="max-h-40 flex-1 resize-none bg-transparent py-2 text-[16px] leading-relaxed text-ink outline-none placeholder:text-faint"
               />
               <button
                 type="submit"
                 disabled={!q.trim() || status === "loading" || noneSelected}
-                aria-label="Ask"
+                aria-label={t("ask.submit")}
                 className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent text-paper transition enabled:hover:bg-accent2 disabled:opacity-30"
               >
                 <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden>
@@ -969,7 +968,7 @@ export default function Home() {
                 onClick={() => document.getElementById("sources")?.scrollIntoView({ behavior: "smooth", block: "start" })}
                 className="mt-1 inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line bg-raised/60 px-2.5 py-1 text-[12px] text-muted transition hover:border-line2 hover:text-ink"
               >
-                Skip to videos
+                {t("answer.skip")}
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
                   <path d="M12 5v14M12 19l-6-6M12 19l6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
@@ -978,10 +977,10 @@ export default function Home() {
               // sources aren't ready yet: show the chip with a glow rotating round its border
               <span
                 className="skip-loading mt-1 inline-flex shrink-0 items-center gap-1.5 rounded-lg border border-line bg-raised/60 px-2.5 py-1 text-[12px] text-muted"
-                aria-label="Finding the videos"
-                title="Finding the videos…"
+                aria-label={t("answer.findingVideos")}
+                title={`${t("answer.findingVideos")}…`}
               >
-                Skip to videos
+                {t("answer.skip")}
                 <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden className="opacity-60">
                   <path d="M12 5v14M12 19l-6-6M12 19l6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
@@ -1058,6 +1057,7 @@ function Sidebar({
   isAdmin: boolean;
   onOpenAdmin: () => void;
 }) {
+  const { t } = useLang();
   return (
     <>
       {/* kept mounted and faded (not abruptly unmounted) so iOS repaints the safe-area strips cleanly */}
@@ -1069,16 +1069,16 @@ function Sidebar({
         }`}
       />
       <aside
-        className={`fixed inset-y-0 left-0 z-40 flex w-[264px] flex-col border-r border-line bg-raised transition-transform duration-200 ${
-          open ? "translate-x-0" : "-translate-x-full"
+        className={`fixed inset-y-0 start-0 z-40 flex w-[264px] flex-col border-line bg-raised transition-transform duration-200 ltr:left-0 ltr:border-r rtl:right-0 rtl:border-l ${
+          open ? "translate-x-0" : "ltr:-translate-x-full rtl:translate-x-full"
         }`}
       >
         <div className="flex items-center justify-between px-3 py-3">
           <button type="button" onClick={onNew} aria-label="La Tafti — new question" className="-m-1 rounded-md p-1 transition hover:opacity-75">
             <Wordmark />
           </button>
-          <button type="button" onClick={onToggle} aria-label="Collapse sidebar" title="Collapse" className="rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink">
-            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden>
+          <button type="button" onClick={onToggle} aria-label={t("aria.collapse")} title={t("aria.collapse")} className="rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden className="rtl:-scale-x-100">
               <path d="m15 6-6 6 6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
           </button>
@@ -1089,28 +1089,28 @@ function Sidebar({
             <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
               <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
             </svg>
-            New question
+            {t("sidebar.new")}
           </button>
         </div>
 
         <nav className="flex-1 overflow-y-auto px-2 py-1">
           {chats.length === 0 ? (
-            <p className="px-2 py-3 text-[12px] leading-relaxed text-faint">Your questions are saved here as you ask them.</p>
+            <p className="px-2 py-3 text-[12px] leading-relaxed text-faint">{t("sidebar.empty")}</p>
           ) : (
             chats.map((c) => (
               <div
                 key={c.id}
                 className={`group/chat relative rounded-lg transition ${c.id === currentChatId ? "bg-line/60" : "hover:bg-line/30"}`}
               >
-                <button type="button" onClick={() => onOpenChat(c)} dir="auto" title={c.q} className="block w-full truncate rounded-lg px-2.5 py-2 pr-7 text-left text-[13px] text-ink">
+                <button type="button" onClick={() => onOpenChat(c)} dir="auto" title={c.q} className="block w-full truncate rounded-lg px-2.5 py-2 pe-7 text-start text-[13px] text-ink">
                   {c.q}
                 </button>
                 <button
                   type="button"
                   onClick={() => onDeleteChat(c.id)}
-                  aria-label="Delete question"
-                  title="Delete"
-                  className="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-faint opacity-0 transition hover:text-danger group-hover/chat:opacity-100"
+                  aria-label={t("aria.deleteQuestion")}
+                  title={t("aria.deleteQuestion")}
+                  className="absolute end-1 top-1/2 -translate-y-1/2 rounded p-1 text-faint opacity-0 transition hover:text-danger group-hover/chat:opacity-100"
                 >
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
                     <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -1123,38 +1123,38 @@ function Sidebar({
 
         <div className="space-y-2.5 border-t border-line p-3">
           <div className="flex items-center justify-between text-[13px] text-muted">
-            <span>Theme</span>
+            <span>{t("sidebar.theme")}</span>
             <ThemeSelector />
           </div>
           {isAdmin && (
             <button
               type="button"
               onClick={onOpenAdmin}
-              className="flex w-full items-center gap-2 border-t border-line pt-2.5 text-left text-[13px] text-muted transition hover:text-ink"
+              className="flex w-full items-center gap-2 border-t border-line pt-2.5 text-start text-[13px] text-muted transition hover:text-ink"
             >
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
                 <path d="M12 3 4 6v6c0 4.5 3.2 7.3 8 9 4.8-1.7 8-4.5 8-9V6l-8-3Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
               </svg>
-              Admin
+              {t("sidebar.admin")}
             </button>
           )}
           <div className="flex items-center justify-between gap-2 border-t border-line pt-2.5">
             <div className="min-w-0">
-              <p className="truncate text-[12px] text-ink" title={email}>{email || "Signed in"}</p>
+              <p className="truncate text-[12px] text-ink" dir="ltr" title={email}>{email || "Signed in"}</p>
               <p className="text-[11px] text-faint">
-                {usedToday}/{dailyCap} answers today
+                {t("sidebar.answersToday", { used: usedToday, cap: dailyCap })}
               </p>
             </div>
-            <button type="button" onClick={() => signOutUser()} aria-label="Sign out" title="Sign out" className="shrink-0 rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink">
+            <button type="button" onClick={() => signOutUser()} aria-label={t("aria.signout")} title={t("aria.signout")} className="shrink-0 rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink rtl:-scale-x-100">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
                 <path d="M15 12H3m0 0 3.5-3.5M3 12l3.5 3.5M9 7V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2v-2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
               </svg>
             </button>
           </div>
           <div className="flex items-center gap-2 pt-0.5 text-[11px] text-faint">
-            <a href="/privacy" className="transition hover:text-ink">Privacy</a>
+            <a href="/privacy" className="transition hover:text-ink">{t("footer.privacy")}</a>
             <span aria-hidden>·</span>
-            <a href="/terms" className="transition hover:text-ink">Terms</a>
+            <a href="/terms" className="transition hover:text-ink">{t("footer.terms")}</a>
           </div>
         </div>
       </aside>
@@ -1168,6 +1168,7 @@ type AdminUser = { uid: string; email: string; cap: number | null; usedToday: nu
 type NamedChannel = { slug: string; name: string };
 
 function AdminPanel({ onClose }: { onClose: () => void }) {
+  const { t } = useLang();
   const [tab, setTab] = useState<"accounts" | "channels">("accounts");
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal>
@@ -1175,20 +1176,20 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
       <div className="relative z-10 flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-line bg-raised shadow-xl">
         <div className="flex items-center justify-between border-b border-line px-4 py-3">
           <div className="flex gap-1">
-            {(["accounts", "channels"] as const).map((t) => (
+            {(["accounts", "channels"] as const).map((tb) => (
               <button
-                key={t}
+                key={tb}
                 type="button"
-                onClick={() => setTab(t)}
-                className={`rounded-md px-3 py-1.5 text-[13px] capitalize transition ${
-                  tab === t ? "bg-line/60 text-ink" : "text-muted hover:text-ink"
+                onClick={() => setTab(tb)}
+                className={`rounded-md px-3 py-1.5 text-[13px] transition ${
+                  tab === tb ? "bg-line/60 text-ink" : "text-muted hover:text-ink"
                 }`}
               >
-                {t}
+                {t(tb === "accounts" ? "admin.tab.accounts" : "admin.tab.channels")}
               </button>
             ))}
           </div>
-          <button type="button" onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink">
+          <button type="button" onClick={onClose} aria-label={t("admin.close")} className="rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink">
             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
               <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
             </svg>
@@ -1201,6 +1202,7 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
 }
 
 function AccountsTab() {
+  const { t } = useLang();
   const [rows, setRows] = useState<AdminUser[]>([]);
   const [defaultCap, setDefaultCap] = useState(DAILY_CAP);
   const [hiddenChannels, setHiddenChannels] = useState<NamedChannel[]>([]);
@@ -1218,7 +1220,7 @@ function AccountsTab() {
         const d = await r.json().catch(() => ({}));
         if (!alive) return;
         if (!r.ok) {
-          setErr(d.error || "Couldn't load accounts.");
+          setErr(d.error || t("admin.couldntLoadAccounts"));
           setStatus("error");
           return;
         }
@@ -1228,7 +1230,7 @@ function AccountsTab() {
         setStatus("ready");
       } catch {
         if (alive) {
-          setErr("Couldn't reach the server.");
+          setErr(t("admin.couldntReach"));
           setStatus("error");
         }
       }
@@ -1275,13 +1277,13 @@ function AccountsTab() {
   return (
     <>
       <p className="px-5 pt-3 text-[12px] leading-relaxed text-faint">
-        Daily answer limit per account (blank = default {defaultCap}).
-        {hiddenChannels.length > 0 ? " Expand an account to show hidden channels to just them." : ""}
+        {t("admin.accounts.help", { cap: defaultCap })}
+        {hiddenChannels.length > 0 ? t("admin.accounts.helpChannels") : ""}
       </p>
       <div className="flex-1 overflow-y-auto px-3 py-3">
-        {status === "loading" && <p className="px-2 py-6 text-center text-sm text-faint">Loading…</p>}
+        {status === "loading" && <p className="px-2 py-6 text-center text-sm text-faint">{t("admin.loading")}</p>}
         {status === "error" && <p className="px-2 py-6 text-center text-sm text-danger">{err}</p>}
-        {status === "ready" && rows.length === 0 && <p className="px-2 py-6 text-center text-sm text-faint">No accounts yet.</p>}
+        {status === "ready" && rows.length === 0 && <p className="px-2 py-6 text-center text-sm text-faint">{t("admin.noAccounts")}</p>}
         {status === "ready" &&
           rows.map((u) => (
             <AdminRow
@@ -1302,6 +1304,7 @@ function AccountsTab() {
 
 /* Choose which channels are hidden from non-admin accounts (enforced server-side in /api/ask too). */
 function ChannelsTab() {
+  const { t } = useLang();
   const [channels, setChannels] = useState<{ slug: string; name: string }[]>([]);
   const [hidden, setHidden] = useState<Set<string>>(new Set());
   const [original, setOriginal] = useState<string>("[]");
@@ -1318,7 +1321,7 @@ function ChannelsTab() {
         const d = await r.json().catch(() => ({}));
         if (!alive) return;
         if (!r.ok) {
-          setErr(d.error || "Couldn't load channels.");
+          setErr(d.error || t("admin.couldntLoadChannels"));
           setStatus("error");
           return;
         }
@@ -1329,7 +1332,7 @@ function ChannelsTab() {
         setStatus("ready");
       } catch {
         if (alive) {
-          setErr("Couldn't reach the server.");
+          setErr(t("admin.couldntReach"));
           setStatus("error");
         }
       }
@@ -1367,13 +1370,11 @@ function ChannelsTab() {
 
   return (
     <>
-      <p className="px-5 pt-3 text-[12px] leading-relaxed text-faint">
-        Hidden channels don&apos;t show in the picker for non-admin accounts and are left out of their answers.
-      </p>
+      <p className="px-5 pt-3 text-[12px] leading-relaxed text-faint">{t("admin.channels.help")}</p>
       <div className="flex-1 overflow-y-auto px-3 py-2">
-        {status === "loading" && <p className="px-2 py-6 text-center text-sm text-faint">Loading…</p>}
+        {status === "loading" && <p className="px-2 py-6 text-center text-sm text-faint">{t("admin.loading")}</p>}
         {status === "error" && <p className="px-2 py-6 text-center text-sm text-danger">{err}</p>}
-        {status === "ready" && channels.length === 0 && <p className="px-2 py-6 text-center text-sm text-faint">No channels yet.</p>}
+        {status === "ready" && channels.length === 0 && <p className="px-2 py-6 text-center text-sm text-faint">{t("admin.noChannels")}</p>}
         {status === "ready" &&
           channels.map((c) => {
             const isHidden = hidden.has(c.slug);
@@ -1391,7 +1392,7 @@ function ChannelsTab() {
                       : "border-accent/40 text-accent hover:border-accent"
                   }`}
                 >
-                  {isHidden ? "Hidden" : "Visible"}
+                  {isHidden ? t("admin.hidden") : t("admin.visible")}
                 </button>
               </div>
             );
@@ -1405,7 +1406,7 @@ function ChannelsTab() {
             disabled={saving || !dirty}
             className="rounded-md border border-line px-3 py-1.5 text-[13px] text-muted transition enabled:hover:border-line2 enabled:hover:text-ink disabled:opacity-40"
           >
-            {saving ? "Saving…" : "Save changes"}
+            {saving ? t("admin.saving") : t("admin.saveChanges")}
           </button>
         </div>
       )}
@@ -1430,6 +1431,7 @@ function AdminRow({
   onSave: (cap: number | null) => void;
   onSaveChannels: (show: string[]) => void;
 }) {
+  const { t } = useLang();
   const [val, setVal] = useState(user.cap != null ? String(user.cap) : "");
   const [expanded, setExpanded] = useState(false);
   const [show, setShow] = useState<Set<string>>(new Set(user.show));
@@ -1441,9 +1443,10 @@ function AdminRow({
     <div className="rounded-lg px-2 py-2 hover:bg-line/20">
       <div className="flex items-center gap-2">
         <div className="min-w-0 flex-1">
-          <p className="truncate text-[13px] text-ink" title={user.email}>{user.email || user.uid}</p>
+          <p className="truncate text-[13px] text-ink" dir="ltr" title={user.email}>{user.email || user.uid}</p>
           <p className="text-[11px] text-faint">
-            {user.usedToday}/{user.cap ?? defaultCap} today{user.cap == null ? " · default" : ""}
+            {t("admin.today", { used: user.usedToday, cap: user.cap ?? defaultCap })}
+            {user.cap == null ? t("admin.default") : ""}
           </p>
         </div>
         <input
@@ -1452,7 +1455,7 @@ function AdminRow({
           onChange={(e) => setVal(e.target.value.replace(/[^0-9]/g, ""))}
           placeholder={String(defaultCap)}
           aria-label={`Daily limit for ${user.email || user.uid}`}
-          className="w-16 rounded-md border border-line bg-paper px-2 py-1 text-right text-[13px] text-ink outline-none focus:border-line2"
+          className="w-16 rounded-md border border-line bg-paper px-2 py-1 text-end text-[13px] text-ink outline-none focus:border-line2"
         />
         <button
           type="button"
@@ -1460,7 +1463,7 @@ function AdminRow({
           disabled={saving || !dirty}
           className="shrink-0 rounded-md border border-line px-2.5 py-1 text-[12px] text-muted transition enabled:hover:border-line2 enabled:hover:text-ink disabled:opacity-40"
         >
-          {saving ? "…" : "Save"}
+          {saving ? "…" : t("admin.save")}
         </button>
       </div>
 
@@ -1471,10 +1474,10 @@ function AdminRow({
             onClick={() => setExpanded((e) => !e)}
             className="mt-1.5 flex items-center gap-1 text-[11px] text-faint transition hover:text-ink"
           >
-            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden className={`transition-transform ${expanded ? "rotate-90" : ""}`}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden className={`transition-transform rtl:-scale-x-100 ${expanded ? "rotate-90" : ""}`}>
               <path d="m9 6 6 6-6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
             </svg>
-            Channel access{show.size ? ` · ${show.size} shown` : ""}
+            {t("admin.channelAccess")}{show.size ? t("admin.shownCount", { n: show.size }) : ""}
           </button>
           {expanded && (
             <div className="mt-1.5 space-y-1 rounded-md border border-line/70 p-2">
@@ -1497,7 +1500,7 @@ function AdminRow({
                         on ? "border-accent/40 text-accent hover:border-accent" : "border-line text-faint hover:text-ink"
                       }`}
                     >
-                      {on ? "Shown" : "Hidden"}
+                      {on ? t("admin.shown") : t("admin.hidden")}
                     </button>
                   </div>
                 );
@@ -1509,7 +1512,7 @@ function AdminRow({
                   disabled={savingChannels || !showDirty}
                   className="rounded-md border border-line px-2.5 py-1 text-[11px] text-muted transition enabled:hover:border-line2 enabled:hover:text-ink disabled:opacity-40"
                 >
-                  {savingChannels ? "…" : "Save access"}
+                  {savingChannels ? "…" : t("admin.saveAccess")}
                 </button>
               </div>
             </div>
@@ -1521,11 +1524,12 @@ function AdminRow({
 }
 
 function Loading({ stage }: { stage: number }) {
+  const { t } = useLang();
   return (
     <div className="fade-up mt-6">
       <div className="relative h-0.5 w-full overflow-hidden rounded-full bg-line sweep" />
-      <p className="mt-4 text-sm text-muted">{STAGES[stage]}…</p>
-      <p className="mt-1 text-xs text-faint">A thorough answer takes a few moments.</p>
+      <p className="mt-4 text-sm text-muted">{t(STAGE_KEYS[stage])}…</p>
+      <p className="mt-1 text-xs text-faint">{t("loading.note")}</p>
     </div>
   );
 }
@@ -1550,10 +1554,11 @@ function StreamingAnswer({ text, question, onCite }: { text: string; question?: 
 
 /* The cited evidences. Each streams in as the answer first references it. */
 function SourcesList({ sources }: { sources: Source[] }) {
+  const { t } = useLang();
   if (!sources.length) return null;
   return (
     <div id="sources" className="mt-7">
-      <h3 className="mb-3 font-serif text-sm font-medium text-muted">Sources</h3>
+      <h3 className="mb-3 font-serif text-sm font-medium text-muted">{t("sources.title")}</h3>
       <div className="space-y-2">
         {sources.map((s) => (
           <SourceCard key={s.n} s={s} />
@@ -1564,10 +1569,11 @@ function SourcesList({ sources }: { sources: Source[] }) {
 }
 
 function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) => void }) {
+  const { t } = useLang();
   if (result.empty || !result.answer) {
     return (
       <div className="mt-5 rounded-xl border border-line bg-raised px-4 py-3 text-sm text-muted">
-        Nothing matched that one. Try different words, or ask in Arabic.
+        {t("answer.empty")}
       </div>
     );
   }
@@ -1582,14 +1588,14 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) =>
       <div className="mt-7 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line pt-4 text-[13px] text-faint">
         {typeof result.cost_usd === "number" && (
           <span className="inline-flex items-center rounded-full border border-gold/45 bg-gold/[0.06] px-2.5 py-1 font-medium text-gold2">
-            This answer cost {aed(result.cost_usd)}
-            <span className="ml-1.5 text-faint">· ${result.cost_usd.toFixed(2)}</span>
+            {t("answer.cost", { cost: aed(result.cost_usd) })}
+            <span className="mx-1.5 text-faint">· ${result.cost_usd.toFixed(2)}</span>
           </span>
         )}
-        <span>
-          Drew on {cov.moments.toLocaleString()} moments across {cov.videos.toLocaleString()} videos
+        <span dir="auto">
+          {t("answer.coverage", { moments: cov.moments.toLocaleString(), videos: cov.videos.toLocaleString() })}
           {result.sources.length
-            ? ` · cited ${result.sources.length} from ${cov.channels} channel${cov.channels === 1 ? "" : "s"}`
+            ? t("answer.cited", { n: result.sources.length, channels: cov.channels, s: cov.channels === 1 ? "" : "s" })
             : ""}
           .
         </span>
@@ -1604,6 +1610,7 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) =>
    clicking the 3-line transcript peek opens the surrounding transcript in a scrollable panel with
    the cited line centred (cited line in full contrast, neighbours greyed). */
 function SourceCard({ s }: { s: Source }) {
+  const { t } = useLang();
   const [open, setOpen] = useState(false);
   const scrollRef = useRef<HTMLDivElement>(null);
   const citedRef = useRef<HTMLParagraphElement>(null);
@@ -1666,7 +1673,7 @@ function SourceCard({ s }: { s: Source }) {
                 >
                   <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
                 </svg>
-                {open ? "Hide transcript" : "Read transcript"}
+                {open ? t("source.hide") : t("source.read")}
               </span>
             </button>
           ) : cited ? (
@@ -1679,7 +1686,7 @@ function SourceCard({ s }: { s: Source }) {
           href={s.url}
           target="_blank"
           rel="noopener noreferrer"
-          aria-label="Open this moment on YouTube"
+          aria-label={t("source.open")}
           className="mt-0.5 shrink-0 rounded-md p-1 text-faint transition hover:bg-line/40 hover:text-accent"
         >
           <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
