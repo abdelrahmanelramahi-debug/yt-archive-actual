@@ -216,11 +216,13 @@ function ChannelPicker({
   selected,
   onChange,
   compact,
+  dropUp = true,
 }: {
   channels: Channel[];
   selected: Set<string>;
   onChange: (next: Set<string>) => void;
   compact?: boolean;
+  dropUp?: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -270,12 +272,18 @@ function ChannelPicker({
           </svg>
           {label}
           <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden className="text-faint">
-            <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+            <path d={dropUp ? "m6 15 6-6 6 6" : "m6 9 6 6 6-6"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
           </svg>
         </button>
       )}
       {open && (
-        <div className="absolute bottom-full left-0 z-30 mb-1.5 max-h-80 w-72 overflow-auto rounded-xl border border-line bg-raised p-1.5 shadow-[0_-16px_40px_-16px_rgba(35,33,27,0.4)]">
+        <div
+          className={`absolute left-0 z-30 max-h-80 w-72 overflow-auto rounded-xl border border-line bg-raised p-1.5 ${
+            dropUp
+              ? "bottom-full mb-1.5 shadow-[0_-16px_40px_-16px_rgba(35,33,27,0.4)]"
+              : "top-full mt-1.5 shadow-[0_16px_40px_-16px_rgba(35,33,27,0.4)]"
+          }`}
+        >
           <div className="flex items-center justify-between px-2 py-1 text-xs">
             <button type="button" className="font-medium text-accent hover:underline" onClick={() => onChange(new Set(channels.map((c) => c.slug)))}>
               Select all
@@ -306,8 +314,9 @@ function ChannelPicker({
   );
 }
 
-// Mobile depth selector: a drop-up holding the depths, their cost, and the explainer.
-function ModeDropup({ modes, mode, onChange }: { modes: Mode[]; mode: string; onChange: (id: string) => void }) {
+// Compact depth selector holding the depths, their cost, and the explainer. Opens up above the ask
+// bar on the phone landing; opens down once the controls sit at the top (after a question is asked).
+function ModeDropup({ modes, mode, onChange, dropUp = true }: { modes: Mode[]; mode: string; onChange: (id: string) => void; dropUp?: boolean }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const current = modes.find((m) => m.id === mode);
@@ -333,11 +342,17 @@ function ModeDropup({ modes, mode, onChange }: { modes: Mode[]; mode: string; on
         {current?.label ?? "Depth"}
         <span className="text-gold2">≈ {aed(current?.usd ?? TYPICAL_COST)}</span>
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden className="text-faint">
-          <path d="m6 15 6-6 6 6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+          <path d={dropUp ? "m6 15 6-6 6 6" : "m6 9 6 6 6-6"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       </button>
       {open && (
-        <div className="absolute bottom-full right-0 z-30 mb-1.5 w-64 rounded-xl border border-line bg-raised p-1.5 shadow-[0_-16px_40px_-16px_rgba(35,33,27,0.4)]">
+        <div
+          className={`absolute right-0 z-30 w-64 rounded-xl border border-line bg-raised p-1.5 ${
+            dropUp
+              ? "bottom-full mb-1.5 shadow-[0_-16px_40px_-16px_rgba(35,33,27,0.4)]"
+              : "top-full mt-1.5 shadow-[0_16px_40px_-16px_rgba(35,33,27,0.4)]"
+          }`}
+        >
           {modes.map((m) => (
             <button
               key={m.id}
@@ -928,8 +943,8 @@ export default function Home() {
                   (the ask bar sits at the top then, so the expanded controls would just clutter) */}
               <div className={`mb-4 flex items-center justify-end gap-2 ${landing ? "sm:hidden" : ""}`}>
                 <StyleToggle value={style} onChange={setStyle} />
-                <ChannelPicker channels={channels} selected={selected} onChange={setSelected} compact />
-                <ModeDropup modes={modes} mode={mode} onChange={setMode} />
+                <ChannelPicker channels={channels} selected={selected} onChange={setSelected} compact dropUp={landing} />
+                <ModeDropup modes={modes} mode={mode} onChange={setMode} dropUp={landing} />
                 {noneSelected && <span className="text-[13px] text-danger">{t("controls.pickChannel")}</span>}
               </div>
 
