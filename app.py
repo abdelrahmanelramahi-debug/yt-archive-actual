@@ -3731,7 +3731,7 @@ Answer the question by QUOTING THE SPEAKERS VERBATIM, in their original language
 - Keep each quote word for word in its ORIGINAL language - do NOT paraphrase, summarise, or translate the quoted words. Put its excerpt number in brackets right after it, like [3].
 - EVERYTHING THAT IS NOT A VERBATIM QUOTE - the speaker names and labels, the lead-in, and any note - must be written in the same language as the question, transliterating an Arabic name into that language where needed. {language} Only the quoted words themselves stay in their original language.
 - Different channels and speakers may disagree. Keep their quotes distinct; do not harmonise them, pick a side, or add a ruling of your own. You are reporting what was said, not giving a fatwa. Keep any words of your own to a minimum.
-- Use only the excerpts that actually address the question. If none of them do, say so plainly, in the same language as the question.
+- Quote only excerpts that DIRECTLY address the specific question asked; leave out any that are merely about the general topic, however related they seem. Do not describe your search or the excerpts (which ones are closest, how many you found, or what the others are about) - just give the relevant quotes under their channel headings. If only a few directly address the question, quote only those; if none of them do, say so plainly, in the same language as the question.
 
 Question: {question}
 
