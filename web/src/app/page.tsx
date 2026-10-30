@@ -1159,7 +1159,8 @@ function Sidebar({
 
 /* Admin-only: raise or reset each account's per-day answer limit. Every action is re-checked
    server-side, so this panel can't grant anything the caller isn't already allowed to do. */
-type AdminUser = { uid: string; email: string; cap: number | null; usedToday: number };
+type AdminUser = { uid: string; email: string; cap: number | null; usedToday: number; show: string[] };
+type NamedChannel = { slug: string; name: string };
 
 function AdminPanel({ onClose }: { onClose: () => void }) {
   const [tab, setTab] = useState<"accounts" | "channels">("accounts");
@@ -1197,9 +1198,11 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
 function AccountsTab() {
   const [rows, setRows] = useState<AdminUser[]>([]);
   const [defaultCap, setDefaultCap] = useState(DAILY_CAP);
+  const [hiddenChannels, setHiddenChannels] = useState<NamedChannel[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [err, setErr] = useState("");
   const [savingUid, setSavingUid] = useState<string | null>(null);
+  const [savingChUid, setSavingChUid] = useState<string | null>(null);
 
   useEffect(() => {
     let alive = true;
@@ -1216,6 +1219,7 @@ function AccountsTab() {
         }
         setRows(d.users || []);
         setDefaultCap(d.defaultCap ?? DAILY_CAP);
+        setHiddenChannels(Array.isArray(d.hiddenChannels) ? d.hiddenChannels : []);
         setStatus("ready");
       } catch {
         if (alive) {
@@ -1244,10 +1248,30 @@ function AccountsTab() {
     }
   }
 
+  async function saveChannels(uid: string, show: string[]) {
+    setSavingChUid(uid);
+    try {
+      const token = await idToken();
+      const r = await fetch("/api/admin/user-channels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ uid, show }),
+      });
+      if (r.ok) {
+        const d = await r.json().catch(() => ({}));
+        const saved = Array.isArray(d.show) ? d.show : show;
+        setRows((rs) => rs.map((u) => (u.uid === uid ? { ...u, show: saved } : u)));
+      }
+    } finally {
+      setSavingChUid(null);
+    }
+  }
+
   return (
     <>
       <p className="px-5 pt-3 text-[12px] leading-relaxed text-faint">
-        Daily answer limit per account. Leave a box blank to use the default ({defaultCap}).
+        Daily answer limit per account (blank = default {defaultCap}).
+        {hiddenChannels.length > 0 ? " Expand an account to show hidden channels to just them." : ""}
       </p>
       <div className="flex-1 overflow-y-auto px-3 py-3">
         {status === "loading" && <p className="px-2 py-6 text-center text-sm text-faint">Loading…</p>}
@@ -1255,7 +1279,16 @@ function AccountsTab() {
         {status === "ready" && rows.length === 0 && <p className="px-2 py-6 text-center text-sm text-faint">No accounts yet.</p>}
         {status === "ready" &&
           rows.map((u) => (
-            <AdminRow key={u.uid} user={u} defaultCap={defaultCap} saving={savingUid === u.uid} onSave={(cap) => saveCap(u.uid, cap)} />
+            <AdminRow
+              key={u.uid}
+              user={u}
+              defaultCap={defaultCap}
+              hiddenChannels={hiddenChannels}
+              saving={savingUid === u.uid}
+              savingChannels={savingChUid === u.uid}
+              onSave={(cap) => saveCap(u.uid, cap)}
+              onSaveChannels={(show) => saveChannels(u.uid, show)}
+            />
           ))}
       </div>
     </>
@@ -1375,34 +1408,109 @@ function ChannelsTab() {
   );
 }
 
-function AdminRow({ user, defaultCap, saving, onSave }: { user: AdminUser; defaultCap: number; saving: boolean; onSave: (cap: number | null) => void }) {
+function AdminRow({
+  user,
+  defaultCap,
+  hiddenChannels,
+  saving,
+  savingChannels,
+  onSave,
+  onSaveChannels,
+}: {
+  user: AdminUser;
+  defaultCap: number;
+  hiddenChannels: NamedChannel[];
+  saving: boolean;
+  savingChannels: boolean;
+  onSave: (cap: number | null) => void;
+  onSaveChannels: (show: string[]) => void;
+}) {
   const [val, setVal] = useState(user.cap != null ? String(user.cap) : "");
+  const [expanded, setExpanded] = useState(false);
+  const [show, setShow] = useState<Set<string>>(new Set(user.show));
   const norm = val.trim() === "" ? null : Number(val);
   const dirty = norm !== user.cap;
+  const showDirty = JSON.stringify([...show].sort()) !== JSON.stringify([...user.show].sort());
+
   return (
-    <div className="flex items-center gap-2 rounded-lg px-2 py-2 hover:bg-line/20">
-      <div className="min-w-0 flex-1">
-        <p className="truncate text-[13px] text-ink" title={user.email}>{user.email || user.uid}</p>
-        <p className="text-[11px] text-faint">
-          {user.usedToday}/{user.cap ?? defaultCap} today{user.cap == null ? " · default" : ""}
-        </p>
+    <div className="rounded-lg px-2 py-2 hover:bg-line/20">
+      <div className="flex items-center gap-2">
+        <div className="min-w-0 flex-1">
+          <p className="truncate text-[13px] text-ink" title={user.email}>{user.email || user.uid}</p>
+          <p className="text-[11px] text-faint">
+            {user.usedToday}/{user.cap ?? defaultCap} today{user.cap == null ? " · default" : ""}
+          </p>
+        </div>
+        <input
+          inputMode="numeric"
+          value={val}
+          onChange={(e) => setVal(e.target.value.replace(/[^0-9]/g, ""))}
+          placeholder={String(defaultCap)}
+          aria-label={`Daily limit for ${user.email || user.uid}`}
+          className="w-16 rounded-md border border-line bg-paper px-2 py-1 text-right text-[13px] text-ink outline-none focus:border-line2"
+        />
+        <button
+          type="button"
+          onClick={() => onSave(norm)}
+          disabled={saving || !dirty}
+          className="shrink-0 rounded-md border border-line px-2.5 py-1 text-[12px] text-muted transition enabled:hover:border-line2 enabled:hover:text-ink disabled:opacity-40"
+        >
+          {saving ? "…" : "Save"}
+        </button>
       </div>
-      <input
-        inputMode="numeric"
-        value={val}
-        onChange={(e) => setVal(e.target.value.replace(/[^0-9]/g, ""))}
-        placeholder={String(defaultCap)}
-        aria-label={`Daily limit for ${user.email || user.uid}`}
-        className="w-16 rounded-md border border-line bg-paper px-2 py-1 text-right text-[13px] text-ink outline-none focus:border-line2"
-      />
-      <button
-        type="button"
-        onClick={() => onSave(norm)}
-        disabled={saving || !dirty}
-        className="shrink-0 rounded-md border border-line px-2.5 py-1 text-[12px] text-muted transition enabled:hover:border-line2 enabled:hover:text-ink disabled:opacity-40"
-      >
-        {saving ? "…" : "Save"}
-      </button>
+
+      {hiddenChannels.length > 0 && (
+        <>
+          <button
+            type="button"
+            onClick={() => setExpanded((e) => !e)}
+            className="mt-1.5 flex items-center gap-1 text-[11px] text-faint transition hover:text-ink"
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden className={`transition-transform ${expanded ? "rotate-90" : ""}`}>
+              <path d="m9 6 6 6-6 6" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+            Channel access{show.size ? ` · ${show.size} shown` : ""}
+          </button>
+          {expanded && (
+            <div className="mt-1.5 space-y-1 rounded-md border border-line/70 p-2">
+              {hiddenChannels.map((c) => {
+                const on = show.has(c.slug);
+                return (
+                  <div key={c.slug} className="flex items-center justify-between gap-2">
+                    <span className={`min-w-0 flex-1 truncate text-[12px] ${on ? "text-ink" : "text-faint"}`} title={c.name}>{c.name}</span>
+                    <button
+                      type="button"
+                      onClick={() =>
+                        setShow((s) => {
+                          const n = new Set(s);
+                          if (n.has(c.slug)) n.delete(c.slug);
+                          else n.add(c.slug);
+                          return n;
+                        })
+                      }
+                      className={`shrink-0 rounded-md border px-2 py-0.5 text-[11px] transition ${
+                        on ? "border-accent/40 text-accent hover:border-accent" : "border-line text-faint hover:text-ink"
+                      }`}
+                    >
+                      {on ? "Shown" : "Hidden"}
+                    </button>
+                  </div>
+                );
+              })}
+              <div className="flex justify-end pt-1">
+                <button
+                  type="button"
+                  onClick={() => onSaveChannels([...show])}
+                  disabled={savingChannels || !showDirty}
+                  className="rounded-md border border-line px-2.5 py-1 text-[11px] text-muted transition enabled:hover:border-line2 enabled:hover:text-ink disabled:opacity-40"
+                >
+                  {savingChannels ? "…" : "Save access"}
+                </button>
+              </div>
+            </div>
+          )}
+        </>
+      )}
     </div>
   );
 }

@@ -43,7 +43,7 @@ export async function POST(req: NextRequest) {
   // restrict to the channels this account may search (admins are unrestricted)
   let effectiveChannels: string[] | undefined;
   try {
-    const allow = await allowedChannels(auth.admin, channels);
+    const allow = await allowedChannels(auth.admin, channels, auth.uid);
     if (allow.blocked) {
       return NextResponse.json(
         { q: question, empty: true, answer: null, sources: [], coverage: { moments: 0, videos: 0, channels: 0 }, remaining },

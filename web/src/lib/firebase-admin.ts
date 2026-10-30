@@ -154,11 +154,14 @@ export async function listUsers(): Promise<{ uid: string; email: string }[]> {
   return out;
 }
 
-// Per-user cap + today's usage, read in one batch.
-export async function readUserMeta(
-  uids: string[]
-): Promise<Record<string, { cap: number | null; count: number; day: string | null }>> {
-  const out: Record<string, { cap: number | null; count: number; day: string | null }> = {};
+type UserMeta = { cap: number | null; count: number; day: string | null; show: string[] };
+
+const strArray = (v?: { arrayValue?: { values?: { stringValue?: string }[] } }) =>
+  (v?.arrayValue?.values || []).map((x) => x.stringValue || "").filter(Boolean);
+
+// Per-user cap, today's usage, and per-account shown channels, read in one batch.
+export async function readUserMeta(uids: string[]): Promise<Record<string, UserMeta>> {
+  const out: Record<string, UserMeta> = {};
   if (uids.length === 0) return out;
   const token = await accessToken();
   const base = `projects/${PROJECT_ID}/databases/(default)/documents/users/`;
@@ -169,7 +172,10 @@ export async function readUserMeta(
   });
   if (!r.ok) throw new Error(`batchGet failed: ${r.status}`);
   const arr = (await r.json()) as {
-    found?: { name: string; fields?: Record<string, { stringValue?: string; integerValue?: string }> };
+    found?: {
+      name: string;
+      fields?: Record<string, { stringValue?: string; integerValue?: string; arrayValue?: { values?: { stringValue?: string }[] } }>;
+    };
   }[];
   for (const row of arr) {
     if (!row.found) continue;
@@ -179,9 +185,31 @@ export async function readUserMeta(
       cap: f.cap?.integerValue != null ? Number(f.cap.integerValue) : null,
       count: Number(f.count?.integerValue || 0),
       day: f.day?.stringValue ?? null,
+      show: strArray(f.showChannels),
     };
   }
   return out;
+}
+
+// Channels shown to one account even when globally hidden (admin-granted exceptions).
+export async function getUserShowChannels(uid: string): Promise<string[]> {
+  const token = await accessToken();
+  const r = await fetch(`${FS_DB}/users/${uid}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (r.status === 404) return [];
+  if (!r.ok) throw new Error(`user read failed: ${r.status}`);
+  const j = (await r.json()) as { fields?: { showChannels?: { arrayValue?: { values?: { stringValue?: string }[] } } } };
+  return strArray(j.fields?.showChannels);
+}
+
+export async function setUserShowChannels(uid: string, slugs: string[]): Promise<void> {
+  const token = await accessToken();
+  const values = slugs.map((s) => ({ stringValue: s }));
+  const r = await fetch(`${FS_DB}/users/${uid}?updateMask.fieldPaths=showChannels`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ fields: { showChannels: { arrayValue: { values } } } }),
+  });
+  if (!r.ok) throw new Error(`set show channels failed: ${r.status}`);
 }
 
 // Set (or clear, with null) a per-account daily cap. Clearing falls back to the global default.

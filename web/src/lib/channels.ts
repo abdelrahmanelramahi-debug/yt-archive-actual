@@ -2,26 +2,39 @@
 // Admins are unrestricted; for everyone else, admin-hidden channels are removed — including from a
 // "search everything" request, which matters because the brain treats an empty channel list as
 // "all", so a non-admin must always be handed an explicit non-hidden list (never empty-means-all).
-import { getHiddenChannels } from "./firebase-admin";
+import { getHiddenChannels, getUserShowChannels } from "./firebase-admin";
 
 const BRAIN_URL = process.env.BRAIN_URL || "http://127.0.0.1:8000";
 const BRAIN_KEY = process.env.BRAIN_KEY || "";
 
-let cache: { slugs: string[]; exp: number } | null = null;
+let cache: { list: { slug: string; name: string }[]; exp: number } | null = null;
 
-// Every channel slug the brain knows, cached ~5 min (only needed to expand a "search everything"
-// request into an explicit list when some channels are hidden).
-export async function allChannelSlugs(): Promise<string[]> {
-  if (cache && cache.exp > Date.now()) return cache.slugs;
+// Every channel the brain knows (slug + display name), cached ~5 min.
+export async function brainChannelList(): Promise<{ slug: string; name: string }[]> {
+  if (cache && cache.exp > Date.now()) return cache.list;
   const r = await fetch(`${BRAIN_URL}/channels`, {
     headers: { ...(BRAIN_KEY ? { "X-Brain-Key": BRAIN_KEY } : {}) },
     cache: "no-store",
   });
   if (!r.ok) throw new Error(`channels fetch failed: ${r.status}`);
-  const d = (await r.json()) as { channels?: { slug: string }[] };
-  const slugs = (d.channels || []).map((c) => c.slug).filter(Boolean);
-  cache = { slugs, exp: Date.now() + 5 * 60_000 };
-  return slugs;
+  const d = (await r.json()) as { channels?: { slug: string; name?: string }[] };
+  const list = (d.channels || []).map((c) => ({ slug: c.slug, name: c.name || c.slug })).filter((c) => c.slug);
+  cache = { list, exp: Date.now() + 5 * 60_000 };
+  return list;
+}
+
+// Just the slugs (used to expand a "search everything" request into an explicit non-hidden list).
+export async function allChannelSlugs(): Promise<string[]> {
+  return (await brainChannelList()).map((c) => c.slug);
+}
+
+// The channels hidden from one specific account: the global hidden list minus any an admin has
+// unhidden just for them.
+export async function effectiveHidden(uid: string | null): Promise<Set<string>> {
+  const hidden = await getHiddenChannels();
+  if (hidden.length === 0 || !uid) return new Set(hidden);
+  const show = new Set(await getUserShowChannels(uid));
+  return new Set(hidden.filter((s) => !show.has(s)));
 }
 
 // Resolve what a request may actually search. `channels` is what the browser asked for (undefined =
@@ -30,12 +43,12 @@ export async function allChannelSlugs(): Promise<string[]> {
 // empty list as "all").
 export async function allowedChannels(
   admin: boolean,
-  channels: string[] | undefined
+  channels: string[] | undefined,
+  uid: string | null
 ): Promise<{ channels: string[] | undefined; blocked: boolean }> {
   if (admin) return { channels, blocked: false };
-  const hidden = await getHiddenChannels();
-  if (hidden.length === 0) return { channels, blocked: false }; // nothing hidden: pass through
-  const hiddenSet = new Set(hidden);
+  const hiddenSet = await effectiveHidden(uid);
+  if (hiddenSet.size === 0) return { channels, blocked: false }; // this account sees everything
   const base = channels && channels.length > 0 ? channels : await allChannelSlugs();
   const list = base.filter((s) => !hiddenSet.has(s));
   if (list.length === 0) return { channels: [], blocked: true };

@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
   // restrict to the channels this account may search (admins are unrestricted)
   let effectiveChannels: string[] | undefined;
   try {
-    const allow = await allowedChannels(auth.admin, channels);
+    const allow = await allowedChannels(auth.admin, channels, auth.uid);
     if (allow.blocked) {
       // nothing left to search once hidden channels are removed — end the stream as "empty"
       return new Response(`event: empty\ndata: {}\n\n`, {

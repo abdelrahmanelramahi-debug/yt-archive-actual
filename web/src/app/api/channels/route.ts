@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyIdToken, getHiddenChannels } from "../../../lib/firebase-admin";
+import { verifyIdToken } from "../../../lib/firebase-admin";
+import { effectiveHidden } from "../../../lib/channels";
 
 // Server-side only: fetch the channel list + depth modes from the brain for the pickers.
 // Non-admins don't see channels an admin has hidden (actual access is enforced in /api/ask too).
@@ -17,7 +18,7 @@ export async function GET(req: NextRequest) {
     if (!auth?.admin && data && Array.isArray(data.channels)) {
       // Fail open here (the picker only lists names); real content access is gated in /api/ask.
       try {
-        const hidden = new Set(await getHiddenChannels());
+        const hidden = await effectiveHidden(auth?.uid ?? null);
         if (hidden.size) data.channels = data.channels.filter((c: { slug: string }) => !hidden.has(c.slug));
       } catch {
         /* leave the list as-is on a transient visibility read error */
