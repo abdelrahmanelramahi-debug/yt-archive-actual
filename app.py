@@ -3682,13 +3682,17 @@ def render_answer(text):
 
 
 CAND_MAX = 500        # how many top moments to feed the deep-answer map-reduce per question
+ANSWER_MAX_DEFAULT = 12000  # answer token ceiling when a mode/caller sets none (comprehensive answers)
+CUSTOM_MOMENTS_MAX = 10000  # admin "custom" depth ceiling (soft - the UI shows diminishing returns)
+CUSTOM_ANSWER_MAX = 32000   # answer-length ceiling, safely within the answer model's output limit
 
 # Depth presets for the website's mode picker. More candidates = more thorough, but pricier/slower.
+# `cand_max` = moments read in; `answer_max` = how long the written answer may get (tokens).
 # `usd` is a typical estimate shown in the UI; the real cost comes back with each answer.
 MODES = {
-    "quick":    {"label": "Quick",    "cand_max": 120,  "per_video": 4, "usd": 0.03},
-    "standard": {"label": "Standard", "cand_max": 500,  "per_video": 6, "usd": 0.08, "route": True},
-    "deep":     {"label": "Deep",     "cand_max": 1000, "per_video": 8, "usd": 0.17, "route": True},
+    "quick":    {"label": "Quick",    "cand_max": 120,  "per_video": 4, "answer_max": 6000,  "usd": 0.04},
+    "standard": {"label": "Standard", "cand_max": 500,  "per_video": 6, "answer_max": 12000, "usd": 0.18, "route": True},
+    "deep":     {"label": "Deep",     "cand_max": 1000, "per_video": 8, "answer_max": 16000, "usd": 0.30, "route": True},
 }
 DEFAULT_MODE = "standard"
 
@@ -3708,12 +3712,13 @@ Below are numbered transcript excerpts from Islamic lectures and Q&A (auto-gener
 REDUCE_PROMPT = """You report what these YouTube channels say, using the findings below: {channels}
 Each finding starts with the channel it came from and ends with its excerpt number, like [3]. The captions are auto-generated, so names and Arabic terms can be garbled.
 
-Write a thorough, well-organised answer to the question from the findings:
-- Attribute every point to the channel that said it — name the channel (and the speaker only if the finding makes it clear; don't invent names). Different channels and speakers may hold different views.
-- Do NOT flatten those differences: where they disagree, lay out each position distinctly, side by side. Do not resolve the disagreement, harmonise them, pick a side, or add a ruling of your own. You are reporting what was said, not giving a fatwa.
-- Group by theme or position where it helps, and use ALL the relevant findings; don't stop at one or two points when more are supported.
-- Put the excerpt number in square brackets after every claim, like [3] or [3, 7]. Only cite numbers that actually support the claim.
-- When a point turns on specific wording (especially Arabic), quote the key words briefly.
+Write a COMPREHENSIVE, well-organised answer - a thorough briefing, not a summary. Your job is to surface everything the findings say about the question; being brief is NOT a goal.
+- Organise by channel: give every channel that has something relevant its own heading on its own line, prefixed with "## " (the channel's name). Under that heading, lay out that channel's full position on the question.
+- Under each channel, cover EVERY distinct relevant point it makes - the ruling, the reasoning, the conditions, the evidences, the examples, the caveats. Do not stop at one or two points when more are supported, and never drop a supported point just to be concise. When a channel's stance is long, break it into short bold sub-headings or sub-points so it stays clear.
+- Quote the speaker's own key words (briefly) wherever a point turns on specific wording, especially Arabic terms.
+- Put the excerpt number in square brackets after every claim, like [3] or [3, 7]. When several moments support a point, cite them all. Only cite numbers that actually support the claim.
+- Attribute every point to the channel that said it (name the speaker too only when the finding makes it clear; don't invent names). Different channels and speakers may hold different views.
+- Do NOT flatten those differences: where they disagree, lay out each position distinctly under its own channel. Do not resolve the disagreement, harmonise them, pick a side, or add a ruling of your own. You are reporting what was said, not giving a fatwa.
 - If the findings genuinely don't answer the question, say so plainly. Don't fill gaps from outside knowledge.
 - {language}
 
@@ -3731,7 +3736,7 @@ Answer the question by QUOTING THE SPEAKERS VERBATIM, in their original language
 - Keep each quote word for word in its ORIGINAL language - do NOT paraphrase, summarise, or translate the quoted words. Put its excerpt number in brackets right after it, like [3].
 - EVERYTHING THAT IS NOT A VERBATIM QUOTE - the speaker names and labels, the lead-in, and any note - must be written in the same language as the question, transliterating an Arabic name into that language where needed. {language} Only the quoted words themselves stay in their original language.
 - Different channels and speakers may disagree. Keep their quotes distinct; do not harmonise them, pick a side, or add a ruling of your own. You are reporting what was said, not giving a fatwa. Keep any words of your own to a minimum.
-- Quote only excerpts that DIRECTLY address the specific question asked; leave out any that are merely about the general topic, however related they seem. Do not describe your search or the excerpts (which ones are closest, how many you found, or what the others are about) - just give the relevant quotes under their channel headings. If only a few directly address the question, quote only those; if none of them do, say so plainly, in the same language as the question.
+- Quote EVERY excerpt that DIRECTLY addresses the specific question asked - if many of them do, include them all; do not sample, trim the list, or stop early. The goal is comprehensive coverage: if the matter is discussed across many moments, give all of those moments. Leave out only excerpts that are merely about the general topic, however related they seem. Do not describe your search or the excerpts (which ones are closest, how many you found, or what the others are about) - just give the relevant quotes under their channel headings. If none of them directly address the question, say so plainly, in the same language as the question.
 
 Question: {question}
 
@@ -3793,7 +3798,7 @@ def _reduce_prompt(q, candidates, findings, style, names, lang):
     if style == "verbatim":
         numbered = _numbered_excerpts(candidates)
         cited = _cited_numbers(findings, len(numbered))
-        block = "\n\n".join(numbered[n - 1] for n in cited) if cited else "\n\n".join(numbered[:40])
+        block = "\n\n".join(numbered[n - 1] for n in cited) if cited else "\n\n".join(numbered[:120])
         return VERBATIM_PROMPT.format(question=q, quotes=block, language=lang)
     return REDUCE_PROMPT.format(channels=names, language=lang, question=q, findings=findings)
 
@@ -3820,7 +3825,7 @@ def _map_findings(anth, settings, q, candidates):
             mapped = list(ex.map(lambda b: cheap(MAP_PROMPT.format(q=q, batch="\n\n".join(b))), batches))
         lines = [ln for r in mapped if r and r.strip().upper() != "NONE"
                  for ln in r.strip().splitlines() if ln.strip()]
-        if len(lines) > 400:  # only for truly massive sets: condense in a middle layer first
+        if len(lines) > 900:  # only for truly massive sets: condense in a middle layer first
             groups = [lines[i:i + 60] for i in range(0, len(lines), 60)]
             with ThreadPoolExecutor(max_workers=min(8, len(groups))) as ex:
                 cond = list(ex.map(lambda g: cheap(MIDREDUCE_PROMPT.format(q=q, findings="\n".join(g))), groups))
@@ -3829,12 +3834,14 @@ def _map_findings(anth, settings, q, candidates):
     return findings, cost[0]
 
 
-def _deep_answer(anth, settings, q, candidates, lang, names, style=None):
+def _deep_answer(anth, settings, q, candidates, lang, names, style=None, answer_max=None):
     """Hierarchical map-reduce: _map_findings distills many excerpts (map), then the answer model
-    writes the cited answer (reduce) — topical synthesis, or verbatim quotes. Returns (answer, usd)."""
+    writes the cited answer (reduce) — topical synthesis, or verbatim quotes. `answer_max` caps the
+    written answer's length (tokens). Returns (answer, usd)."""
     findings, cost = _map_findings(anth, settings, q, candidates)
     answer, u = call_claude(anth, settings["answer_model"],
-                            _reduce_prompt(q, candidates, findings, style, names, lang), 7000)
+                            _reduce_prompt(q, candidates, findings, style, names, lang),
+                            answer_max or ANSWER_MAX_DEFAULT)
     return answer, cost + u
 
 
@@ -4034,10 +4041,11 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False):
     return candidates, queries
 
 
-def synthesize(ctx, q, candidates, style=None):
-    """Write the cited answer from the candidate moments (the deep map-reduce). Returns
-    {answer, usd, cited, coverage}. Raises on a Claude error (callers handle credit/billing)."""
-    answer, usd = _deep_answer(ctx["anth"], ctx["settings"], q, candidates, ctx["lang"], ctx["names"], style)
+def synthesize(ctx, q, candidates, style=None, answer_max=None):
+    """Write the cited answer from the candidate moments (the deep map-reduce). `answer_max` caps the
+    written answer's length. Returns {answer, usd, cited, coverage}. Raises on a Claude error
+    (callers handle credit/billing)."""
+    answer, usd = _deep_answer(ctx["anth"], ctx["settings"], q, candidates, ctx["lang"], ctx["names"], style, answer_max)
     cited = sorted({int(n) for grp in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", answer)
                     for n in re.findall(r"\d+", grp) if 0 < int(n) <= len(candidates)})
     cov_c = len({candidates[n - 1].get("channel") for n in cited}) or len(ctx["scope"])
@@ -4068,32 +4076,40 @@ def _apply_channel_names(ctx, q, candidates, channel_names):
     return [{**c, "channel": override.get(c.get("channel"), c.get("channel"))} for c in candidates]
 
 
-def answer_question(ctx, q, channels=None, mode=None, style=None, channel_names=None):
+def answer_question(ctx, q, channels=None, mode=None, style=None, channel_names=None,
+                    cand_max=None, answer_max=None):
     """Retrieve + synthesize in one call: the whole deluxe answer as plain data (empty=True if nothing
     matched). `channels` (slugs) limits the search; `mode` (quick/standard/deep) sets the depth;
     `style` (topical/verbatim) sets how the answer is written; `channel_names` (slug -> {en, ar}) is the
-    admin name override. No printing or file I/O - the CLI and the web server format and persist it."""
+    admin name override. `cand_max`/`answer_max` override the mode's moment and answer-length budgets
+    (the admin 'custom' depth), clamped. No printing or file I/O - callers format and persist it."""
     m = MODES.get(mode or DEFAULT_MODE, MODES[DEFAULT_MODE])
-    candidates, queries = retrieve(ctx, q, channels=channels, cand_max=m["cand_max"],
+    cmax = max(1, min(int(cand_max), CUSTOM_MOMENTS_MAX)) if cand_max else m["cand_max"]
+    amax = max(1000, min(int(answer_max), CUSTOM_ANSWER_MAX)) if answer_max else m.get("answer_max")
+    candidates, queries = retrieve(ctx, q, channels=channels, cand_max=cmax,
                                    per_vid=m["per_video"], route=m.get("route", False))
     if not candidates:
         return {"q": q, "empty": True, "answer": None, "candidates": [], "cited": [], "queries": queries,
                 "coverage": {"moments": 0, "videos": 0, "channels": 0}, "usd": 0.0}
     candidates = _apply_channel_names(ctx, q, candidates, channel_names)
-    res = synthesize(ctx, q, candidates, style)
+    res = synthesize(ctx, q, candidates, style, amax)
     return {"q": q, "empty": False, "candidates": candidates, "queries": queries, **res}
 
 
-def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel_names=None):
+def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel_names=None,
+                           cand_max=None, answer_max=None):
     """Streaming deluxe answer: a generator of (kind, payload) events for the website's live answer.
     Yields ('status', stage) as it searches then reads, many ('delta', text) as the answer writes,
     then one ('done', {...}) with the final answer, candidates and cited numbers - or ('empty', None)
     when nothing matched. `style` (topical/verbatim) sets how the answer is written; `channel_names`
-    (slug -> {en, ar}) applies the admin name override. Same retrieval and map-reduce as
-    answer_question; only the final write streams."""
+    (slug -> {en, ar}) applies the admin name override; `cand_max`/`answer_max` override the mode's
+    moment and answer-length budgets (the admin 'custom' depth), clamped. Same retrieval and
+    map-reduce as answer_question; only the final write streams."""
     m = MODES.get(mode or DEFAULT_MODE, MODES[DEFAULT_MODE])
+    cmax = max(1, min(int(cand_max), CUSTOM_MOMENTS_MAX)) if cand_max else m["cand_max"]
+    amax = max(1000, min(int(answer_max), CUSTOM_ANSWER_MAX)) if answer_max else m.get("answer_max")
     yield ("status", "searching")
-    candidates, _ = retrieve(ctx, q, channels=channels, cand_max=m["cand_max"],
+    candidates, _ = retrieve(ctx, q, channels=channels, cand_max=cmax,
                              per_vid=m["per_video"], route=m.get("route", False))
     if not candidates:
         yield ("empty", None)
@@ -4117,7 +4133,8 @@ def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel
                     emitted.add(n)
                     yield ("source", source_json(ctx, candidates[n - 1], n))
 
-    for kind, payload in call_claude_stream(ctx["anth"], ctx["settings"]["answer_model"], prompt, 7000):
+    for kind, payload in call_claude_stream(ctx["anth"], ctx["settings"]["answer_model"], prompt,
+                                            amax or ANSWER_MAX_DEFAULT):
         if kind == "delta":
             yield ("delta", payload)
             answer += payload
@@ -4176,11 +4193,42 @@ def transcript_context(ctx, chunk, before=4, after=4):
 
 def source_json(ctx, chunk, n):
     """One cited moment as plain JSON for the website's source card: its metadata plus a short
-    window of surrounding transcript (`context` + `citedIdx`). Shared by /ask and the stream."""
+    window of surrounding transcript (`context` + `citedIdx`). Shared by /ask and the stream.
+    `video_id` + `slug` let the site fetch the video's full transcript on demand (download button)."""
     lines, ci = transcript_context(ctx, chunk)
     return {"n": n, "timestamp": chunk["timestamp"], "title": chunk["title"],
             "channel": chunk.get("channel"), "date": chunk.get("date"), "url": chunk["url"],
+            "video_id": chunk.get("video_id"), "slug": chunk.get("_slug"),
             "context": lines, "citedIdx": ci}
+
+
+def full_transcript(ctx, video_id, slug=None):
+    """Every transcript segment of one source video, in time order, as [{ts, text}] - for the
+    website's per-source transcript download. Keyword channels are read from their FTS db; semantic
+    moments are already in memory. Returns [] if the video isn't in the loaded scope."""
+    if not video_id:
+        return []
+    if slug:  # keyword channel: read the whole video straight from its FTS db
+        ch = next((c for c in ctx["scope"]
+                   if c.get("slug") == slug and c.get("search") == "keyword"), None)
+        if ch is not None:
+            con = None
+            try:
+                con = kw_db(ch)
+                rows = con.execute("SELECT ts, text FROM info WHERE video_id=? ORDER BY chunk_id",
+                                   (video_id,)).fetchall()
+            except Exception:
+                rows = []
+            finally:
+                if con is not None:
+                    con.close()
+            if rows:
+                return [{"ts": r[0], "text": r[1]} for r in rows]
+            # nothing in the keyword db: fall through to the in-memory scan as a safety net
+    # semantic channel: the video's chunks share its id with adjacent indices (chunk_id = vid_NNNN)
+    items = [c for c in ctx.get("by_id", {}).values() if c.get("video_id") == video_id]
+    items.sort(key=lambda c: c.get("n", 0))
+    return [{"ts": c.get("timestamp"), "text": c.get("text", "")} for c in items]
 
 
 def ask(settings):

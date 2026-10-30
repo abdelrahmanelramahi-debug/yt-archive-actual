@@ -132,6 +132,16 @@ def search(q: str = Query(..., min_length=1), k: int = 20, x_brain_key: str = He
     return {"q": q, "results": hits}
 
 
+@app.get("/transcript")
+def transcript(video_id: str = Query(..., min_length=1), slug: str = Query(None),
+               x_brain_key: str = Header(None)):
+    """The full transcript of one source video (ordered [{ts, text}]) for the website's per-source
+    download button. No Claude call - just the stored captions - so no spend and no rate limit."""
+    _check_key(x_brain_key)
+    ctx = _ctx()
+    return {"video_id": video_id, "lines": brain.full_transcript(ctx, video_id, slug)}
+
+
 @app.get("/channels")
 def channels(x_brain_key: str = Header(None)):
     """The channels available to search (for the website's channel picker) and the depth modes."""
@@ -150,6 +160,8 @@ class AskRequest(BaseModel):
     mode: str | None = None            # quick | standard | deep
     style: str | None = None           # topical (default) | verbatim
     channel_names: dict[str, dict[str, str]] | None = None  # slug -> {en, ar} admin name overrides
+    cand_max: int | None = None        # admin "custom" depth: moments to read in (clamped in the brain)
+    answer_max: int | None = None      # admin "custom" depth: answer length in tokens (clamped)
 
 
 def _sse(event, data):
@@ -175,7 +187,7 @@ def ask_stream(req: AskRequest, request: Request, x_brain_key: str = Header(None
 
     def gen():
         try:
-            for kind, payload in brain.answer_question_stream(ctx, q, channels=req.channels, mode=req.mode, style=req.style, channel_names=req.channel_names):
+            for kind, payload in brain.answer_question_stream(ctx, q, channels=req.channels, mode=req.mode, style=req.style, channel_names=req.channel_names, cand_max=req.cand_max, answer_max=req.answer_max):
                 if kind == "status":
                     yield _sse("status", {"stage": payload})
                 elif kind == "delta":
@@ -212,7 +224,7 @@ def ask(req: AskRequest, request: Request, x_brain_key: str = Header(None),
     if blocked:
         raise HTTPException(status_code=429, detail=blocked)
     try:
-        res = brain.answer_question(ctx, q, channels=req.channels, mode=req.mode, style=req.style, channel_names=req.channel_names)
+        res = brain.answer_question(ctx, q, channels=req.channels, mode=req.mode, style=req.style, channel_names=req.channel_names, cand_max=req.cand_max, answer_max=req.answer_max)
     except Exception as e:
         msg = str(e).lower()
         if "credit" in msg or "billing" in msg:
