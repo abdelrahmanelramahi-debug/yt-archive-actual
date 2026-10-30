@@ -22,6 +22,8 @@ type Source = {
   channel: string | null;
   date: string | null;
   url: string;
+  video_id?: string | null; // lets the card fetch the whole video's transcript on demand
+  slug?: string | null; // channel slug (set for keyword channels, so the brain reads the right db)
   context?: Line[]; // a short window of surrounding transcript
   citedIdx?: number; // which line in `context` is the cited moment
 };
@@ -346,7 +348,7 @@ function ModeDropup({ modes, mode, onChange, dropUp = true }: { modes: Mode[]; m
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const current = modes.find((m) => m.id === mode);
-  const keeps: Record<string, string> = { quick: "~120", standard: "~500", deep: "~1,000" };
+  const keeps: Record<string, string> = { quick: "~120", standard: "~500", deep: "~1,000", custom: "you set" };
 
   useEffect(() => {
     if (!open) return;
@@ -421,11 +423,12 @@ function Stat({ n, label }: { n: string; label: string }) {
 function ModeExplainer({ modes }: { modes: Mode[] }) {
   const [open, setOpen] = useState(false);
   if (!modes.length) return null;
-  const keeps: Record<string, string> = { quick: "~120", standard: "~500", deep: "~1,000" };
+  const keeps: Record<string, string> = { quick: "~120", standard: "~500", deep: "~1,000", custom: "you set" };
   const when: Record<string, string> = {
     quick: "a fast gist",
     standard: "most questions",
     deep: "broad or contested topics",
+    custom: "admin: dial it in",
   };
   return (
     <div className="mt-2">
@@ -462,6 +465,93 @@ function ModeExplainer({ modes }: { modes: Mode[] }) {
   );
 }
 
+// Rough "up to" cost of the admin custom depth: moments drive the cheap read (map) step, answer
+// tokens drive the pricier write (reduce) step. Calibrated to the standard presets; the real cost
+// always comes back with the answer. An over-estimate, since the answer rarely fills its whole budget.
+const CUSTOM_MOMENTS_MAX = 10000;
+const CUSTOM_TOKENS_MAX = 32000;
+function estimateCost(moments: number, tokens: number): number {
+  return 0.01 + moments * 0.00012 + tokens * 0.00001;
+}
+
+// One labelled control: a number box for an exact value + a slider to dial it, with a help line.
+function Dial({
+  label, value, min, max, step, unit, help, onChange,
+}: {
+  label: string; value: number; min: number; max: number; step: number;
+  unit?: string; help: string; onChange: (n: number) => void;
+}) {
+  const clamp = (n: number) => Math.max(min, Math.min(max, Math.round(n / step) * step));
+  return (
+    <div className="mb-3.5 last:mb-0">
+      <div className="flex items-baseline justify-between gap-2">
+        <label className="font-medium text-ink">{label}</label>
+        <span className="inline-flex items-baseline gap-1">
+          <input
+            type="number"
+            min={min}
+            max={max}
+            step={step}
+            value={value}
+            onChange={(e) => onChange(clamp(Number(e.target.value) || min))}
+            className="w-20 rounded-md border border-line bg-paper px-2 py-1 text-right text-[13px] tabular-nums text-ink outline-none focus:border-accent"
+          />
+          {unit && <span className="text-[12px] text-faint">{unit}</span>}
+        </span>
+      </div>
+      <input
+        type="range"
+        min={min}
+        max={max}
+        step={step}
+        value={value}
+        onChange={(e) => onChange(clamp(Number(e.target.value)))}
+        className="mt-2 w-full accent-accent"
+      />
+      <p className="mt-1 text-[12px] leading-relaxed text-muted">{help}</p>
+    </div>
+  );
+}
+
+// Admin-only "Custom" depth: dial the moments read in and the answer's max length, with a live
+// cost estimate. The brain clamps both; the helper text explains the limits and diminishing returns.
+function CustomControls({
+  moments, tokens, onMoments, onTokens, usd,
+}: {
+  moments: number; tokens: number; onMoments: (n: number) => void; onTokens: (n: number) => void; usd: number;
+}) {
+  const { t } = useLang();
+  return (
+    <div dir="auto" className="fade-up mt-3 w-full max-w-md rounded-xl border border-gold/30 bg-gold/[0.04] p-4">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <span className="text-[13px] font-medium text-ink">{t("custom.title")}</span>
+        <span className="text-[13px] text-gold2">{t("custom.upto", { price: aed(usd) })}</span>
+      </div>
+      <Dial
+        label={t("custom.moments.label")}
+        value={moments}
+        min={50}
+        max={CUSTOM_MOMENTS_MAX}
+        step={50}
+        unit={t("custom.moments.unit")}
+        help={t("custom.moments.help")}
+        onChange={onMoments}
+      />
+      <Dial
+        label={t("custom.tokens.label")}
+        value={tokens}
+        min={2000}
+        max={CUSTOM_TOKENS_MAX}
+        step={1000}
+        unit={t("custom.tokens.unit")}
+        help={t("custom.tokens.help")}
+        onChange={onTokens}
+      />
+      <p className="mt-1 border-t border-gold/20 pt-2.5 text-[12px] leading-relaxed text-muted">{t("custom.note")}</p>
+    </div>
+  );
+}
+
 export default function Home() {
   const [q, setQ] = useState("");
   const [asked, setAsked] = useState<string | null>(null);
@@ -480,6 +570,8 @@ export default function Home() {
   const [modes, setModes] = useState<Mode[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [mode, setMode] = useState("standard");
+  const [customMoments, setCustomMoments] = useState(1500); // admin "custom" depth: moments read in
+  const [customTokens, setCustomTokens] = useState(16000);  // admin "custom" depth: answer length (tokens)
   const [style, setStyle] = useState<"topical" | "verbatim">("topical"); // how the answer is written
   const [answerStyle, setAnswerStyle] = useState<"topical" | "verbatim">("topical"); // the displayed answer's style
   const [totals, setTotals] = useState<{ moments: number; videos: number } | null>(null);
@@ -585,6 +677,8 @@ export default function Home() {
           channel: s.channel ?? null,
           date: s.date ?? null,
           url: s.url,
+          video_id: s.video_id ?? null,
+          slug: s.slug ?? null,
           context: (s.context ?? []).map((l) => ({ ts: l.ts ?? null, text: l.text })),
           citedIdx: s.citedIdx ?? 0,
         })),
@@ -669,6 +763,7 @@ export default function Home() {
     setResult(null);
     setError("");
     setReturnY(null);
+    setCiteToast(null);
     const token = await idToken();
     if (!token) {
       setError(t("err.signInAgain"));
@@ -677,7 +772,8 @@ export default function Home() {
     }
     const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
     const useSubset = channels.length > 0 && selected.size > 0 && selected.size < channels.length;
-    const payload = { question: text, mode, style, channels: useSubset ? [...selected] : undefined };
+    const custom = mode === "custom" && isAdmin ? { cand_max: customMoments, answer_max: customTokens } : {};
+    const payload = { question: text, mode, style, channels: useSubset ? [...selected] : undefined, ...custom };
     // Prefer the streaming answer; fall back to the one-shot endpoint if a stream can't be opened.
     setLive(true);
     try {
@@ -846,14 +942,23 @@ export default function Home() {
     setQ("");
     setStreamText("");
     setReturnY(null);
+    setCiteToast(null);
     setCurrentChatId(null);
     if (window.innerWidth < 640) setSidebarOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
-  function scrollToSource(n: number) {
+  function scrollToSource(n: number, e?: React.MouseEvent) {
     const el = document.getElementById(`src-${n}`);
-    if (!el) return;
+    if (!el) {
+      // the sources stream in after the answer: a citation can be clicked before its card exists.
+      // Tell the reader it's still loading (rather than the click doing nothing), near the cursor.
+      const msg = status === "done" ? t("cite.missing") : t("cite.loading");
+      const x = e ? Math.min(Math.max(e.clientX, 130), window.innerWidth - 130) : window.innerWidth / 2;
+      const y = e ? e.clientY : 120;
+      setCiteToast({ x, y, msg });
+      return;
+    }
     setReturnY(window.scrollY); // remember where the citation was, for the jump-back button
     el.scrollIntoView({ behavior: "smooth", block: "center" });
     el.classList.add("src-hit");
@@ -861,9 +966,19 @@ export default function Home() {
   }
 
   const [returnY, setReturnY] = useState<number | null>(null);
+  const [citeToast, setCiteToast] = useState<{ x: number; y: number; msg: string } | null>(null);
+  // the "still loading" note fades itself out; it also clears whenever a new question starts
+  useEffect(() => {
+    if (!citeToast) return;
+    const id = setTimeout(() => setCiteToast(null), 2800);
+    return () => clearTimeout(id);
+  }, [citeToast]);
   const landing = status === "idle";
   const noneSelected = channels.length > 0 && selected.size === 0;
-  const modeUsd = modes.find((m) => m.id === mode)?.usd ?? TYPICAL_COST;
+  // admins get a 4th "Custom" depth whose cost tracks the dials; everyone else sees the server's modes
+  const customUsd = estimateCost(customMoments, customTokens);
+  const displayModes: Mode[] = isAdmin ? [...modes, { id: "custom", label: t("mode.custom"), usd: customUsd }] : modes;
+  const modeUsd = displayModes.find((m) => m.id === mode)?.usd ?? TYPICAL_COST;
 
   if (authLoading) {
     return <main className="grid min-h-[70vh] place-items-center text-sm text-faint">Loading…</main>;
@@ -970,7 +1085,7 @@ export default function Home() {
               <div className={`mb-4 flex items-center justify-end gap-2 ${landing ? "sm:hidden" : ""}`}>
                 <StyleToggle value={style} onChange={setStyle} />
                 <ChannelPicker channels={channels} selected={selected} onChange={setSelected} compact dropUp={landing} />
-                <ModeDropup modes={modes} mode={mode} onChange={setMode} dropUp={landing} />
+                <ModeDropup modes={displayModes} mode={mode} onChange={setMode} dropUp={landing} />
                 {noneSelected && <span className="text-[13px] text-danger">{t("controls.pickChannel")}</span>}
               </div>
 
@@ -987,14 +1102,27 @@ export default function Home() {
                   <ChannelPicker channels={channels} selected={selected} onChange={setSelected} />
                 </div>
                 <div className="flex flex-col items-end gap-2">
-                  <ModeExplainer modes={modes} />
+                  <ModeExplainer modes={displayModes} />
                   <p className="text-[13px] text-gold2">{t("controls.perAnswer", { price: aed(modeUsd) })}</p>
                   <div className="flex items-center gap-2">
                     <StyleToggle value={style} onChange={setStyle} />
-                    <ModePicker modes={modes} mode={mode} onChange={setMode} />
+                    <ModePicker modes={displayModes} mode={mode} onChange={setMode} />
                   </div>
                 </div>
               </div>
+
+              {/* admin "Custom" depth: the two dials + live estimate, shown when that mode is picked */}
+              {mode === "custom" && isAdmin && (
+                <div className="mb-3 flex justify-end">
+                  <CustomControls
+                    moments={customMoments}
+                    tokens={customTokens}
+                    onMoments={setCustomMoments}
+                    onTokens={setCustomTokens}
+                    usd={customUsd}
+                  />
+                </div>
+              )}
             </>
           )}
 
@@ -1089,6 +1217,18 @@ export default function Home() {
 
           {status === "done" && result && <AnswerView result={result} onCite={scrollToSource} />}
         </section>
+      )}
+
+      {/* citation clicked before its source card exists yet (sources stream in after the answer) */}
+      {citeToast && (
+        <div
+          role="status"
+          dir="auto"
+          style={{ left: citeToast.x, top: Math.max(citeToast.y - 12, 12) }}
+          className="fade-up pointer-events-none fixed z-50 max-w-[240px] -translate-x-1/2 -translate-y-full rounded-lg border border-line bg-raised px-3 py-2 text-center text-[12.5px] leading-snug text-ink shadow-[0_12px_34px_-10px_rgba(35,33,27,0.45)]"
+        >
+          {citeToast.msg}
+        </div>
       )}
 
       {/* jump-back: appears after a citation jump, returns you to where you were reading */}
@@ -1719,7 +1859,7 @@ function Loading({ stage }: { stage: number }) {
 
 /* The answer as it streams in, with a blinking caret, and the evidences appearing beneath it as
    the answer references them. AnswerView takes over (with the cost line) once the stream finishes. */
-function StreamingAnswer({ text, question, onCite }: { text: string; question?: string; onCite: (n: number) => void }) {
+function StreamingAnswer({ text, question, onCite }: { text: string; question?: string; onCite: (n: number, e?: React.MouseEvent) => void }) {
   // The evidences are intentionally not shown here — they stream in after the answer and appear once
   // it's done, so the text stays smooth while it writes.
   return (
@@ -1751,7 +1891,7 @@ function SourcesList({ sources }: { sources: Source[] }) {
   );
 }
 
-function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) => void }) {
+function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number, e?: React.MouseEvent) => void }) {
   const { t } = useLang();
   if (result.empty || !result.answer) {
     return (
@@ -1789,13 +1929,66 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number) =>
   );
 }
 
+/* Save a source video's transcript as a plain-text file the reader can keep: a short header
+   (title, channel, date, link) then one line per segment, each prefixed with its timestamp. */
+function buildTranscriptFile(s: Source, lines: Line[]) {
+  const head = [
+    s.title || "",
+    [s.channel, s.date].filter(Boolean).join(" · "),
+    s.url || "",
+  ].filter(Boolean).join("\n");
+  const body = lines.map((l) => (l.ts ? `[${l.ts}] ${l.text}` : l.text)).join("\n");
+  const blob = new Blob([`${head}\n\n${body}\n`], { type: "text/plain;charset=utf-8" });
+  const name =
+    `${s.channel ? s.channel + " - " : ""}${s.title || s.url || "transcript"}`
+      .replace(/[\\/:*?"<>|\n\r]+/g, " ")
+      .replace(/\s+/g, " ")
+      .trim()
+      .slice(0, 120) || "transcript";
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${name}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
 /* A cited source. The title + timestamp (and the arrow icon) link out to the moment on YouTube;
    clicking the 3-line transcript peek opens the surrounding transcript in a scrollable panel with
    the cited line centred (cited line in full contrast, neighbours greyed). */
 function SourceCard({ s }: { s: Source }) {
   const { t } = useLang();
   const [open, setOpen] = useState(false);
+  const [dl, setDl] = useState<"idle" | "loading" | "error">("idle");
   const scrollRef = useRef<HTMLDivElement>(null);
+
+  // Download the whole video's transcript. Fetch it from the brain when we have the video id;
+  // for an old saved chat (no id) fall back to the transcript window we already hold.
+  async function downloadTranscript() {
+    if (dl === "loading") return;
+    if (!s.video_id) {
+      const ctx = s.context ?? [];
+      if (ctx.length) buildTranscriptFile(s, ctx);
+      return;
+    }
+    setDl("loading");
+    try {
+      const token = await idToken();
+      const qs = new URLSearchParams({ video_id: s.video_id });
+      if (s.slug) qs.set("slug", s.slug);
+      const r = await fetch(`/api/transcript?${qs}`, token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
+      const data = await r.json().catch(() => ({}));
+      const lines: Line[] = Array.isArray(data?.lines) ? data.lines : [];
+      if (!r.ok || !lines.length) throw new Error("no transcript");
+      buildTranscriptFile(s, lines);
+      setDl("idle");
+    } catch {
+      setDl("error");
+      setTimeout(() => setDl("idle"), 2200);
+    }
+  }
+
   const citedRef = useRef<HTMLParagraphElement>(null);
   const ctx = s.context ?? [];
   const ci = s.citedIdx ?? 0;
@@ -1865,17 +2058,40 @@ function SourceCard({ s }: { s: Source }) {
             </span>
           ) : null}
         </div>
-        <a
-          href={s.url}
-          target="_blank"
-          rel="noopener noreferrer"
-          aria-label={t("source.open")}
-          className="mt-0.5 shrink-0 rounded-md p-1 text-faint transition hover:bg-line/40 hover:text-accent"
-        >
-          <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
-            <path d="M7 17 17 7M9 7h8v8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-          </svg>
-        </a>
+        <div className="mt-0.5 flex shrink-0 items-center gap-0.5">
+          <button
+            type="button"
+            onClick={downloadTranscript}
+            disabled={dl === "loading"}
+            aria-label={dl === "error" ? t("source.dlError") : t("source.download")}
+            title={dl === "error" ? t("source.dlError") : t("source.download")}
+            className={`rounded-md p-1 transition hover:bg-line/40 disabled:opacity-60 ${
+              dl === "error" ? "text-danger" : "text-faint hover:text-accent"
+            }`}
+          >
+            {dl === "loading" ? (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden className="animate-spin">
+                <path d="M12 3a9 9 0 1 0 9 9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+              </svg>
+            ) : (
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            )}
+          </button>
+          <a
+            href={s.url}
+            target="_blank"
+            rel="noopener noreferrer"
+            aria-label={t("source.open")}
+            title={t("source.open")}
+            className="rounded-md p-1 text-faint transition hover:bg-line/40 hover:text-accent"
+          >
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M7 17 17 7M9 7h8v8" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </a>
+        </div>
       </div>
       {open && ctx.length > 0 && (
         <div
@@ -1925,7 +2141,7 @@ function stripEchoedQuestion(answer: string, question?: string): string {
   return answer;
 }
 
-function renderAnswer(text: string, onCite: (n: number) => void) {
+function renderAnswer(text: string, onCite: (n: number, e?: React.MouseEvent) => void) {
   const lines = text.split("\n");
   const out: React.ReactNode[] = [];
   let i = 0;
@@ -1987,7 +2203,7 @@ function renderAnswer(text: string, onCite: (n: number) => void) {
 
 /* inline: **bold** (may contain *italic*), *italic*, and [n] / [n, m] citations.
    Bold is matched lazily so it spans nested single-* italics; italics are parsed within. */
-function inline(text: string, key: string, onCite: (n: number) => void) {
+function inline(text: string, key: string, onCite: (n: number, e?: React.MouseEvent) => void) {
   const nodes: React.ReactNode[] = [];
   // 1) pull out citation chips first (they don't nest with emphasis)
   const parts = text.split(/(\[\d+(?:\s*,\s*\d+)*\])/g).filter(Boolean);
@@ -1999,7 +2215,7 @@ function inline(text: string, key: string, onCite: (n: number) => void) {
         <span key={`${key}-c${pi}`} className="cites">
           {nums.map((n, j) => (
             <span key={j}>
-              <sup className="cite" onClick={() => onCite(n)} title={`Jump to source ${n}`}>
+              <sup className="cite" onClick={(e) => onCite(n, e)} title={`Jump to source ${n}`}>
                 {n}
               </sup>
               {j < nums.length - 1 ? <span className="cite-sep" /> : ""}

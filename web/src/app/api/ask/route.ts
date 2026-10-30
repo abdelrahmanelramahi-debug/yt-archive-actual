@@ -12,7 +12,7 @@ export async function POST(req: NextRequest) {
   if (!auth) return NextResponse.json({ error: "Please sign in to ask." }, { status: 401 });
   const uid = auth.uid;
 
-  let body: { question?: string; channels?: string[]; mode?: string; style?: string } = {};
+  let body: { question?: string; channels?: string[]; mode?: string; style?: string; cand_max?: number; answer_max?: number } = {};
   try {
     body = await req.json();
   } catch {
@@ -25,6 +25,9 @@ export async function POST(req: NextRequest) {
   const channels = Array.isArray(body?.channels) ? body.channels : undefined;
   const mode = typeof body?.mode === "string" ? body.mode : undefined;
   const style = typeof body?.style === "string" ? body.style : undefined;
+  // "custom" depth (admin only); the brain clamps. Ignored for non-admins.
+  const candMax = auth.admin && Number.isFinite(body?.cand_max) ? Math.round(body.cand_max as number) : undefined;
+  const answerMax = auth.admin && Number.isFinite(body?.answer_max) ? Math.round(body.answer_max as number) : undefined;
 
   // reserve one of today's free answers before spending on Claude (cap is per-account)
   let remaining: number;
@@ -78,6 +81,8 @@ export async function POST(req: NextRequest) {
         mode,
         style,
         channel_names: Object.keys(names).length ? names : undefined,
+        cand_max: candMax,
+        answer_max: answerMax,
       }),
     });
     const data = await r.json().catch(() => ({ error: "The brain returned an unexpected response." }));

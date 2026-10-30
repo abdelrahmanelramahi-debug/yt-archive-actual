@@ -30,10 +30,27 @@ const Answers = (
     <path d="M12 3l1.9 4.8L19 9l-4.3 2.6L16 17l-4-2.8L8 17l1.3-5.4L5 9l5.1-1.2L12 3Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
   </svg>
 );
+const Depth = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden className={ICON}>
+    <path d="M12 3 3 8l9 5 9-5-9-5ZM4 12l8 4.5L20 12M4 16l8 4.5L20 16" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+const Download = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden className={ICON}>
+    <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
 
 // Updates, newest first. Add a new entry at the TOP (with a fresh id) to re-show the pop-up; older
 // entries stay as flip-back pages. The id of the top entry is what "seen" is tracked against.
 const UPDATES: { id: string; items: { key: string; icon: ReactNode }[] }[] = [
+  {
+    id: "2026-10-30c",
+    items: [
+      { key: "comprehensive", icon: Depth },
+      { key: "download", icon: Download },
+    ],
+  },
   {
     id: "2026-10-30b",
     items: [
