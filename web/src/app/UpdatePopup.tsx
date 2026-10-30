@@ -5,32 +5,23 @@ import { useLang } from "../lib/i18n";
 
 // Bump this whenever there's a new batch worth announcing — each new id shows the pop-up once per
 // browser. Keep the item list below in sync with what actually shipped.
-const UPDATE_ID = "2026-10-30";
+const UPDATE_ID = "2026-10-30b";
 
 const ICON = "mt-0.5 shrink-0 text-accent";
 const ITEMS: { key: string; icon: ReactNode }[] = [
   {
-    key: "history",
+    key: "verbatim",
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden className={ICON}>
-        <path d="M3 3v5h5M3.05 13a9 9 0 1 0 2.13-5.5L3 8M12 7v5l3 2" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        <path d="M9.5 5H6a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2h1.5c0 2.5-1 3.8-3 4.5M20 5h-3.5a2 2 0 0 0-2 2v3a2 2 0 0 0 2 2H18c0 2.5-1 3.8-3 4.5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
     ),
   },
   {
-    key: "arabic",
+    key: "whosaid",
     icon: (
       <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden className={ICON}>
-        <circle cx="12" cy="12" r="9" stroke="currentColor" strokeWidth="1.6" />
-        <path d="M3 12h18M12 3a15 15 0 0 1 0 18M12 3a15 15 0 0 0 0 18" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
-      </svg>
-    ),
-  },
-  {
-    key: "answers",
-    icon: (
-      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden className={ICON}>
-        <path d="M12 3l1.9 4.8L19 9l-4.3 2.6L16 17l-4-2.8L8 17l1.3-5.4L5 9l5.1-1.2L12 3Z" stroke="currentColor" strokeWidth="1.5" strokeLinejoin="round" />
+        <path d="M16 21v-1.5a3.5 3.5 0 0 0-3.5-3.5h-5A3.5 3.5 0 0 0 4 19.5V21M10 12.5a3.75 3.75 0 1 0 0-7.5 3.75 3.75 0 0 0 0 7.5ZM20 21v-1.5a3.5 3.5 0 0 0-2.6-3.4M16 5.2a3.75 3.75 0 0 1 0 7.1" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
       </svg>
     ),
   },

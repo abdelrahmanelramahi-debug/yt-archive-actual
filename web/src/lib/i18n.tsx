@@ -127,6 +127,10 @@ const DICT: Record<Lang, Record<string, string>> = {
     "whatsnew.arabic.b": "Switch the whole app between English and العربية with the toggle at the top.",
     "whatsnew.answers.t": "Smoother answers",
     "whatsnew.answers.b": "Answers now stream more smoothly and read more cleanly.",
+    "whatsnew.verbatim.t": "Verbatim mode",
+    "whatsnew.verbatim.b": "A new Topical / Verbatim toggle — read the scholars' exact words in the original language, or a synthesized overview.",
+    "whatsnew.whosaid.t": "Who said what",
+    "whatsnew.whosaid.b": "Answers now attribute each point to its channel and keep differing views side by side — what was said, not one blended verdict.",
   },
   ar: {
     "hero.title": "اسأل عبر الأرشيف",
@@ -248,6 +252,10 @@ const DICT: Record<Lang, Record<string, string>> = {
     "whatsnew.arabic.b": "بدّل التطبيق كله بين الإنجليزية والعربية من الزرّ في الأعلى.",
     "whatsnew.answers.t": "إجابات أكثر سلاسة",
     "whatsnew.answers.b": "تظهر الإجابات الآن بسلاسة أكبر وتُقرأ بوضوح أكثر.",
+    "whatsnew.verbatim.t": "الوضع الحرفي",
+    "whatsnew.verbatim.b": "مبدِّل جديد موضوعي / حرفي — اقرأ كلام العلماء بنصّه في لغته الأصلية، أو ملخّصًا مُصاغًا.",
+    "whatsnew.whosaid.t": "مَن قال ماذا",
+    "whatsnew.whosaid.b": "تنسب الإجابات الآن كل نقطة إلى قناتها وتُبقي الآراء المختلفة جنبًا إلى جنب — ما قيل، لا حُكمًا واحدًا مُدمَجًا.",
   },
 };
 
