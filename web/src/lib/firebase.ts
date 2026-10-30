@@ -6,7 +6,7 @@ import { getFirestore } from "firebase/firestore";
 
 const firebaseConfig = {
   apiKey: "AIzaSyDJEVAiRUXRwBKu5kdcr75rMOqC-WnfzZQ",
-  authDomain: "latafti.firebaseapp.com",
+  authDomain: "latafti.com", // same-site auth handler (proxied in next.config.ts) — see that file
   projectId: "latafti",
   storageBucket: "latafti.firebasestorage.app",
   messagingSenderId: "1072018674493",
