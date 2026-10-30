@@ -3725,12 +3725,13 @@ Findings:
 
 VERBATIM_PROMPT = """You are given numbered transcript excerpts from Islamic lectures and Q&A - the speakers' own words (auto-generated captions, so wording and names may be garbled; ">>" marks a change of speaker). Each excerpt begins with its number and the channel it is from, like "[3] ChannelName | ...".
 
-Answer the question by QUOTING THE SPEAKERS VERBATIM, in their original language, exactly as in the excerpts:
-- Quote the speakers' own words directly. Do NOT paraphrase, summarise, or translate the quotes - keep every quote in its original language, word for word.
-- Lead each line with the quote itself (so its own language sets the line's direction), then an em-dash and the channel it is from, then the excerpt number in brackets. Name the speaker only if the excerpt makes it clear; otherwise say the speaker isn't identified. Don't invent names. For example: "<quote>" - ChannelName [3]
-- Different channels and speakers may disagree. Keep their quotes distinct and let them stand side by side; do not harmonise them, pick a side, or add a ruling of your own. You are reporting what was said, not giving a fatwa.
-- Add only MINIMAL connective text of your own - a brief lead-in, or a short link between quotes - and write any such words of your own in the same language as the question. Keep your own words to a minimum.
-- Use only the excerpts that actually address the question, in a sensible order. If none of them do, say so plainly, in the same language as the question.
+Answer the question by QUOTING THE SPEAKERS VERBATIM, in their original language, exactly as in the excerpts. Organise the answer by channel:
+- Group the quotes by the channel they came from. Lead each group with that channel's name as a heading on its own line, prefixed with "## ".
+- Under each channel, list its relevant quotes as bullet points (one quote per bullet). Lead a bullet with the speaker's name and a colon ONLY if the excerpt actually identifies the speaker; otherwise give just the quote. If quotes within a channel are clearly from different unidentified speakers, you may note that briefly. Never invent a speaker's name.
+- Quote the speakers' own words directly: do NOT paraphrase, summarise, or translate - keep every quote in its original language, word for word. Put the excerpt number in brackets right after each quote, like [3].
+- Different channels and speakers may disagree. Keep their quotes distinct; do not harmonise them, pick a side, or add a ruling of your own. You are reporting what was said, not giving a fatwa.
+- Any words of your own (a short lead-in, or a brief note) go in the same language as the question; keep them minimal.
+- Use only the excerpts that actually address the question. If none of them do, say so plainly, in the same language as the question.
 
 Question: {question}
 
