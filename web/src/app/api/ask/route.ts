@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyIdToken, consumeDaily } from "../../../lib/firebase-admin";
-import { allowedChannels } from "../../../lib/channels";
+import { allowedChannels, channelNameOverrides } from "../../../lib/channels";
 
 // Runs server-side only (Node runtime by default): the brain URL and key never reach the browser.
 const BRAIN_URL = process.env.BRAIN_URL || "http://127.0.0.1:8000";
@@ -62,6 +62,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Could not check channel access — try again." }, { status: 503 });
   }
 
+  const names = await channelNameOverrides();
   const clientIp = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim();
   try {
     const r = await fetch(`${BRAIN_URL}/ask`, {
@@ -71,7 +72,13 @@ export async function POST(req: NextRequest) {
         ...(BRAIN_KEY ? { "X-Brain-Key": BRAIN_KEY } : {}),
         ...(clientIp ? { "X-Client-IP": clientIp } : {}),
       },
-      body: JSON.stringify({ question, channels: effectiveChannels, mode, style }),
+      body: JSON.stringify({
+        question,
+        channels: effectiveChannels,
+        mode,
+        style,
+        channel_names: Object.keys(names).length ? names : undefined,
+      }),
     });
     const data = await r.json().catch(() => ({ error: "The brain returned an unexpected response." }));
     if (data && typeof data === "object") (data as { remaining?: number }).remaining = remaining;

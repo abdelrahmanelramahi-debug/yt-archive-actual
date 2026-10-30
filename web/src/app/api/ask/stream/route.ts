@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyIdToken, consumeDaily } from "../../../../lib/firebase-admin";
-import { allowedChannels } from "../../../../lib/channels";
+import { allowedChannels, channelNameOverrides } from "../../../../lib/channels";
 
 // Streams the brain's Server-Sent Events straight through to the browser. Runs server-side only,
 // so the brain URL + key never reach the client. The page falls back to /api/ask on any failure.
@@ -65,6 +65,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Could not check channel access — try again." }, { status: 503 });
   }
 
+  const names = await channelNameOverrides();
   const clientIp = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim();
   try {
     const r = await fetch(`${BRAIN_URL}/ask/stream`, {
@@ -74,7 +75,13 @@ export async function POST(req: NextRequest) {
         ...(BRAIN_KEY ? { "X-Brain-Key": BRAIN_KEY } : {}),
         ...(clientIp ? { "X-Client-IP": clientIp } : {}),
       },
-      body: JSON.stringify({ question, channels: effectiveChannels, mode, style }),
+      body: JSON.stringify({
+        question,
+        channels: effectiveChannels,
+        mode,
+        style,
+        channel_names: Object.keys(names).length ? names : undefined,
+      }),
     });
     if (!r.ok || !r.body) {
       const data = await r.json().catch(() => ({ error: "The brain returned an unexpected response." }));

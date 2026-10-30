@@ -2,10 +2,20 @@
 // Admins are unrestricted; for everyone else, admin-hidden channels are removed — including from a
 // "search everything" request, which matters because the brain treats an empty channel list as
 // "all", so a non-admin must always be handed an explicit non-hidden list (never empty-means-all).
-import { getHiddenChannels, getUserShowChannels } from "./firebase-admin";
+import { getHiddenChannels, getUserShowChannels, getChannelNames, type ChannelNameOverrides } from "./firebase-admin";
 
 const BRAIN_URL = process.env.BRAIN_URL || "http://127.0.0.1:8000";
 const BRAIN_KEY = process.env.BRAIN_KEY || "";
+
+// Admin channel-name overrides ({slug: {en, ar}}), fail-open: a read error just means the brain's own
+// names are used. Shared by the ask routes (passed to the brain) and the picker (/api/channels).
+export async function channelNameOverrides(): Promise<ChannelNameOverrides> {
+  try {
+    return await getChannelNames();
+  } catch {
+    return {};
+  }
+}
 
 let cache: { list: { slug: string; name: string }[]; exp: number } | null = null;
 

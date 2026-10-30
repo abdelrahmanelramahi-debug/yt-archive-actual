@@ -238,3 +238,44 @@ export async function setHiddenChannels(slugs: string[]): Promise<void> {
   });
   if (!r.ok) throw new Error(`visibility write failed: ${r.status}`);
 }
+
+// Admin-set display names per channel, English and/or Arabic, overriding the terminal-set name.
+// Stored as one map on config/channelNames ({ names: { <slug>: { en, ar } } }); the brain's own name
+// stays the fallback. Only non-empty names are kept.
+export type ChannelNameOverrides = Record<string, { en?: string; ar?: string }>;
+const NAMES_DOC = `${FS_DB}/config/channelNames`;
+
+export async function getChannelNames(): Promise<ChannelNameOverrides> {
+  const token = await accessToken();
+  const r = await fetch(NAMES_DOC, { headers: { Authorization: `Bearer ${token}` } });
+  if (r.status === 404) return {};
+  if (!r.ok) throw new Error(`channel names read failed: ${r.status}`);
+  const j = (await r.json()) as {
+    fields?: { names?: { mapValue?: { fields?: Record<string, { mapValue?: { fields?: Record<string, { stringValue?: string }> } }> } } };
+  };
+  const out: ChannelNameOverrides = {};
+  for (const [slug, v] of Object.entries(j.fields?.names?.mapValue?.fields || {})) {
+    const f = v.mapValue?.fields || {};
+    const en = f.en?.stringValue?.trim();
+    const ar = f.ar?.stringValue?.trim();
+    if (en || ar) out[slug] = { ...(en ? { en } : {}), ...(ar ? { ar } : {}) };
+  }
+  return out;
+}
+
+export async function setChannelNames(names: ChannelNameOverrides): Promise<void> {
+  const token = await accessToken();
+  const fields: Record<string, { mapValue: { fields: Record<string, { stringValue: string }> } }> = {};
+  for (const [slug, v] of Object.entries(names)) {
+    const inner: Record<string, { stringValue: string }> = {};
+    if (v.en && v.en.trim()) inner.en = { stringValue: v.en.trim() };
+    if (v.ar && v.ar.trim()) inner.ar = { stringValue: v.ar.trim() };
+    if (Object.keys(inner).length) fields[slug] = { mapValue: { fields: inner } };
+  }
+  const r = await fetch(`${NAMES_DOC}?updateMask.fieldPaths=names`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ fields: { names: { mapValue: { fields } } } }),
+  });
+  if (!r.ok) throw new Error(`channel names write failed: ${r.status}`);
+}

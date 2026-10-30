@@ -3,7 +3,7 @@
 import { useEffect, useRef, useState } from "react";
 import { collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy, limit, serverTimestamp } from "firebase/firestore";
 import { useAuth, signOutUser, idToken } from "../lib/auth";
-import { useLang, LangToggle } from "../lib/i18n";
+import { useLang, LangToggle, type Lang } from "../lib/i18n";
 import { db } from "../lib/firebase";
 import SignIn from "./SignIn";
 import UpdatePopup from "./UpdatePopup";
@@ -35,8 +35,33 @@ type Answer = {
   cost_usd?: number;
   error?: string;
 };
-type Channel = { slug: string; name: string; kind: string };
+type Channel = { slug: string; name: string; kind: string; en?: string; ar?: string };
 type Mode = { id: string; label: string; usd: number };
+
+// A channel's display name in the current interface language: the admin override for that language,
+// then the other language's override, then the brain's own name.
+function channelName(c: { name: string; en?: string; ar?: string }, lang: Lang): string {
+  const pick = lang === "ar" ? c.ar || c.en : c.en || c.ar;
+  return (pick || c.name || "").trim() || c.name;
+}
+
+// Admin name-override map helpers: drop blank entries, and a stable string for change detection.
+type NameMap = Record<string, { en?: string; ar?: string }>;
+function cleanNames(n: NameMap): NameMap {
+  const out: NameMap = {};
+  for (const slug of Object.keys(n)) {
+    const en = (n[slug]?.en || "").trim();
+    const ar = (n[slug]?.ar || "").trim();
+    if (en || ar) out[slug] = { ...(en ? { en } : {}), ...(ar ? { ar } : {}) };
+  }
+  return out;
+}
+function normNames(n: NameMap): string {
+  const c = cleanNames(n);
+  const sorted: NameMap = {};
+  for (const k of Object.keys(c).sort()) sorted[k] = c[k];
+  return JSON.stringify(sorted);
+}
 
 // Typical cost of one deluxe answer, shown up front so nobody is surprised by the bill.
 const TYPICAL_COST = 0.08;
@@ -226,6 +251,7 @@ function ChannelPicker({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const { lang } = useLang();
   const all = selected.size === channels.length;
   const label = all ? "All channels" : selected.size === 0 ? "No channels" : `${selected.size} of ${channels.length}`;
 
@@ -304,7 +330,7 @@ function ChannelPicker({
                 className="h-4 w-4 shrink-0 accent-[var(--color-accent)]"
               />
               <span className="min-w-0 flex-1 truncate text-sm text-ink" dir="auto">
-                {c.name}
+                {channelName(c, lang)}
               </span>
             </label>
           ))}
@@ -1374,7 +1400,9 @@ function ChannelsTab() {
   const { t } = useLang();
   const [channels, setChannels] = useState<{ slug: string; name: string }[]>([]);
   const [hidden, setHidden] = useState<Set<string>>(new Set());
-  const [original, setOriginal] = useState<string>("[]");
+  const [names, setNames] = useState<NameMap>({});
+  const [origHidden, setOrigHidden] = useState("[]");
+  const [origNames, setOrigNames] = useState("{}");
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [err, setErr] = useState("");
   const [saving, setSaving] = useState(false);
@@ -1393,9 +1421,12 @@ function ChannelsTab() {
           return;
         }
         const hid: string[] = Array.isArray(d.hidden) ? d.hidden : [];
+        const nm: NameMap = d.names && typeof d.names === "object" ? d.names : {};
         setChannels(Array.isArray(d.channels) ? d.channels : []);
         setHidden(new Set(hid));
-        setOriginal(JSON.stringify([...hid].sort()));
+        setNames(nm);
+        setOrigHidden(JSON.stringify([...hid].sort()));
+        setOrigNames(normNames(nm));
         setStatus("ready");
       } catch {
         if (alive) {
@@ -1409,7 +1440,7 @@ function ChannelsTab() {
     };
   }, []);
 
-  const dirty = JSON.stringify([...hidden].sort()) !== original;
+  const dirty = JSON.stringify([...hidden].sort()) !== origHidden || normNames(names) !== origNames;
 
   function toggle(slug: string) {
     setHidden((h) => {
@@ -1420,16 +1451,24 @@ function ChannelsTab() {
     });
   }
 
+  function setName(slug: string, field: "en" | "ar", value: string) {
+    setNames((n) => ({ ...n, [slug]: { ...n[slug], [field]: value } }));
+  }
+
   async function save() {
     setSaving(true);
     try {
       const token = await idToken();
+      const clean = cleanNames(names);
       const r = await fetch("/api/admin/channels", {
         method: "POST",
         headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
-        body: JSON.stringify({ hidden: [...hidden] }),
+        body: JSON.stringify({ hidden: [...hidden], names: clean }),
       });
-      if (r.ok) setOriginal(JSON.stringify([...hidden].sort()));
+      if (r.ok) {
+        setOrigHidden(JSON.stringify([...hidden].sort()));
+        setOrigNames(normNames(clean));
+      }
     } finally {
       setSaving(false);
     }
@@ -1445,22 +1484,41 @@ function ChannelsTab() {
         {status === "ready" &&
           channels.map((c) => {
             const isHidden = hidden.has(c.slug);
+            const nm = names[c.slug] || {};
             return (
-              <div key={c.slug} className="flex items-center justify-between gap-2 rounded-lg px-2 py-2 hover:bg-line/20">
-                <span className={`min-w-0 flex-1 truncate text-[13px] ${isHidden ? "text-faint line-through" : "text-ink"}`} title={c.name}>
-                  {c.name}
-                </span>
-                <button
-                  type="button"
-                  onClick={() => toggle(c.slug)}
-                  className={`shrink-0 rounded-md border px-2.5 py-1 text-[12px] transition ${
-                    isHidden
-                      ? "border-line text-faint hover:text-ink"
-                      : "border-accent/40 text-accent hover:border-accent"
-                  }`}
-                >
-                  {isHidden ? t("admin.hidden") : t("admin.visible")}
-                </button>
+              <div key={c.slug} className="rounded-lg px-2 py-2 hover:bg-line/20">
+                <div className="flex items-center justify-between gap-2">
+                  <span className={`min-w-0 flex-1 truncate text-[13px] ${isHidden ? "text-faint line-through" : "text-ink"}`} title={c.name}>
+                    {c.name}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => toggle(c.slug)}
+                    className={`shrink-0 rounded-md border px-2.5 py-1 text-[12px] transition ${
+                      isHidden
+                        ? "border-line text-faint hover:text-ink"
+                        : "border-accent/40 text-accent hover:border-accent"
+                    }`}
+                  >
+                    {isHidden ? t("admin.hidden") : t("admin.visible")}
+                  </button>
+                </div>
+                <div className="mt-1.5 flex gap-1.5">
+                  <input
+                    value={nm.en ?? ""}
+                    onChange={(e) => setName(c.slug, "en", e.target.value)}
+                    placeholder={t("admin.channels.enName")}
+                    dir="ltr"
+                    className="min-w-0 flex-1 rounded-md border border-line bg-paper px-2 py-1 text-[12px] text-ink outline-none transition focus:border-accent"
+                  />
+                  <input
+                    value={nm.ar ?? ""}
+                    onChange={(e) => setName(c.slug, "ar", e.target.value)}
+                    placeholder={t("admin.channels.arName")}
+                    dir="rtl"
+                    className="min-w-0 flex-1 rounded-md border border-line bg-paper px-2 py-1 text-[12px] text-ink outline-none transition focus:border-accent"
+                  />
+                </div>
               </div>
             );
           })}
