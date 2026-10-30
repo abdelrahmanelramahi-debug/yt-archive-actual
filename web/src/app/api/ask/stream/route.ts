@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { uidFromAuthHeader, consumeDaily } from "../../../../lib/firebase-admin";
+import { verifyIdToken, consumeDaily } from "../../../../lib/firebase-admin";
+import { allowedChannels } from "../../../../lib/channels";
 
 // Streams the brain's Server-Sent Events straight through to the browser. Runs server-side only,
 // so the brain URL + key never reach the client. The page falls back to /api/ask on any failure.
@@ -11,8 +12,9 @@ const BRAIN_KEY = process.env.BRAIN_KEY || "";
 
 export async function POST(req: NextRequest) {
   // only signed-in users, within their daily allowance (same rule as /api/ask)
-  const uid = await uidFromAuthHeader(req.headers.get("authorization"));
-  if (!uid) return NextResponse.json({ error: "Please sign in to ask." }, { status: 401 });
+  const auth = await verifyIdToken(req.headers.get("authorization"));
+  if (!auth) return NextResponse.json({ error: "Please sign in to ask." }, { status: 401 });
+  const uid = auth.uid;
 
   let body: { question?: string; channels?: string[]; mode?: string } = {};
   try {
@@ -40,6 +42,22 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Could not check your daily limit — try again." }, { status: 503 });
   }
 
+  // restrict to the channels this account may search (admins are unrestricted)
+  let effectiveChannels: string[] | undefined;
+  try {
+    const allow = await allowedChannels(auth.admin, channels);
+    if (allow.blocked) {
+      // nothing left to search once hidden channels are removed — end the stream as "empty"
+      return new Response(`event: empty\ndata: {}\n\n`, {
+        status: 200,
+        headers: { "Content-Type": "text/event-stream; charset=utf-8", "Cache-Control": "no-cache, no-transform" },
+      });
+    }
+    effectiveChannels = allow.channels;
+  } catch {
+    return NextResponse.json({ error: "Could not check channel access — try again." }, { status: 503 });
+  }
+
   const clientIp = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim();
   try {
     const r = await fetch(`${BRAIN_URL}/ask/stream`, {
@@ -49,7 +67,7 @@ export async function POST(req: NextRequest) {
         ...(BRAIN_KEY ? { "X-Brain-Key": BRAIN_KEY } : {}),
         ...(clientIp ? { "X-Client-IP": clientIp } : {}),
       },
-      body: JSON.stringify({ question, channels, mode }),
+      body: JSON.stringify({ question, channels: effectiveChannels, mode }),
     });
     if (!r.ok || !r.body) {
       const data = await r.json().catch(() => ({ error: "The brain returned an unexpected response." }));

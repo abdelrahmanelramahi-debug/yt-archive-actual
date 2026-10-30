@@ -571,12 +571,15 @@ export default function Home() {
     }
   }
 
-  // load the channel list + depth modes for the pickers, once signed in
+  // load the channel list + depth modes for the pickers, once signed in. The token lets the server
+  // hide admin-hidden channels from non-admins.
   useEffect(() => {
     if (!user) return;
-    fetch("/api/channels")
-      .then((r) => r.json())
-      .then((d) => {
+    (async () => {
+      try {
+        const token = await idToken();
+        const r = await fetch("/api/channels", token ? { headers: { Authorization: `Bearer ${token}` } } : undefined);
+        const d = await r.json();
         const chs: Channel[] = Array.isArray(d.channels) ? d.channels : [];
         setChannels(chs);
         setSelected(new Set(chs.map((c) => c.slug)));
@@ -585,8 +588,10 @@ export default function Home() {
         if (typeof d.total_moments === "number" && typeof d.total_videos === "number") {
           setTotals({ moments: d.total_moments, videos: d.total_videos });
         }
-      })
-      .catch(() => {});
+      } catch {
+        /* ignore */
+      }
+    })();
   }, [user]);
 
   // cycle the loading stage copy while we wait — only for the non-streaming fallback; when a stream
@@ -1144,6 +1149,39 @@ function Sidebar({
 type AdminUser = { uid: string; email: string; cap: number | null; usedToday: number };
 
 function AdminPanel({ onClose }: { onClose: () => void }) {
+  const [tab, setTab] = useState<"accounts" | "channels">("accounts");
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal>
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} aria-hidden />
+      <div className="relative z-10 flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-line bg-raised shadow-xl">
+        <div className="flex items-center justify-between border-b border-line px-4 py-3">
+          <div className="flex gap-1">
+            {(["accounts", "channels"] as const).map((t) => (
+              <button
+                key={t}
+                type="button"
+                onClick={() => setTab(t)}
+                className={`rounded-md px-3 py-1.5 text-[13px] capitalize transition ${
+                  tab === t ? "bg-line/60 text-ink" : "text-muted hover:text-ink"
+                }`}
+              >
+                {t}
+              </button>
+            ))}
+          </div>
+          <button type="button" onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+        {tab === "accounts" ? <AccountsTab /> : <ChannelsTab />}
+      </div>
+    </div>
+  );
+}
+
+function AccountsTab() {
   const [rows, setRows] = useState<AdminUser[]>([]);
   const [defaultCap, setDefaultCap] = useState(DAILY_CAP);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
@@ -1194,31 +1232,133 @@ function AdminPanel({ onClose }: { onClose: () => void }) {
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal>
-      <div className="absolute inset-0 bg-black/50" onClick={onClose} aria-hidden />
-      <div className="relative z-10 flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-line bg-raised shadow-xl">
-        <div className="flex items-center justify-between border-b border-line px-5 py-3.5">
-          <h2 className="font-serif text-lg text-ink">Accounts</h2>
-          <button type="button" onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink">
-            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
-            </svg>
+    <>
+      <p className="px-5 pt-3 text-[12px] leading-relaxed text-faint">
+        Daily answer limit per account. Leave a box blank to use the default ({defaultCap}).
+      </p>
+      <div className="flex-1 overflow-y-auto px-3 py-3">
+        {status === "loading" && <p className="px-2 py-6 text-center text-sm text-faint">Loading…</p>}
+        {status === "error" && <p className="px-2 py-6 text-center text-sm text-danger">{err}</p>}
+        {status === "ready" && rows.length === 0 && <p className="px-2 py-6 text-center text-sm text-faint">No accounts yet.</p>}
+        {status === "ready" &&
+          rows.map((u) => (
+            <AdminRow key={u.uid} user={u} defaultCap={defaultCap} saving={savingUid === u.uid} onSave={(cap) => saveCap(u.uid, cap)} />
+          ))}
+      </div>
+    </>
+  );
+}
+
+/* Choose which channels are hidden from non-admin accounts (enforced server-side in /api/ask too). */
+function ChannelsTab() {
+  const [channels, setChannels] = useState<{ slug: string; name: string }[]>([]);
+  const [hidden, setHidden] = useState<Set<string>>(new Set());
+  const [original, setOriginal] = useState<string>("[]");
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [err, setErr] = useState("");
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const token = await idToken();
+        const r = await fetch("/api/admin/channels", { headers: { Authorization: `Bearer ${token}` } });
+        const d = await r.json().catch(() => ({}));
+        if (!alive) return;
+        if (!r.ok) {
+          setErr(d.error || "Couldn't load channels.");
+          setStatus("error");
+          return;
+        }
+        const hid: string[] = Array.isArray(d.hidden) ? d.hidden : [];
+        setChannels(Array.isArray(d.channels) ? d.channels : []);
+        setHidden(new Set(hid));
+        setOriginal(JSON.stringify([...hid].sort()));
+        setStatus("ready");
+      } catch {
+        if (alive) {
+          setErr("Couldn't reach the server.");
+          setStatus("error");
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  const dirty = JSON.stringify([...hidden].sort()) !== original;
+
+  function toggle(slug: string) {
+    setHidden((h) => {
+      const next = new Set(h);
+      if (next.has(slug)) next.delete(slug);
+      else next.add(slug);
+      return next;
+    });
+  }
+
+  async function save() {
+    setSaving(true);
+    try {
+      const token = await idToken();
+      const r = await fetch("/api/admin/channels", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ hidden: [...hidden] }),
+      });
+      if (r.ok) setOriginal(JSON.stringify([...hidden].sort()));
+    } finally {
+      setSaving(false);
+    }
+  }
+
+  return (
+    <>
+      <p className="px-5 pt-3 text-[12px] leading-relaxed text-faint">
+        Hidden channels don&apos;t show in the picker for non-admin accounts and are left out of their answers.
+      </p>
+      <div className="flex-1 overflow-y-auto px-3 py-2">
+        {status === "loading" && <p className="px-2 py-6 text-center text-sm text-faint">Loading…</p>}
+        {status === "error" && <p className="px-2 py-6 text-center text-sm text-danger">{err}</p>}
+        {status === "ready" && channels.length === 0 && <p className="px-2 py-6 text-center text-sm text-faint">No channels yet.</p>}
+        {status === "ready" &&
+          channels.map((c) => {
+            const isHidden = hidden.has(c.slug);
+            return (
+              <div key={c.slug} className="flex items-center justify-between gap-2 rounded-lg px-2 py-2 hover:bg-line/20">
+                <span className={`min-w-0 flex-1 truncate text-[13px] ${isHidden ? "text-faint line-through" : "text-ink"}`} title={c.name}>
+                  {c.name}
+                </span>
+                <button
+                  type="button"
+                  onClick={() => toggle(c.slug)}
+                  className={`shrink-0 rounded-md border px-2.5 py-1 text-[12px] transition ${
+                    isHidden
+                      ? "border-line text-faint hover:text-ink"
+                      : "border-accent/40 text-accent hover:border-accent"
+                  }`}
+                >
+                  {isHidden ? "Hidden" : "Visible"}
+                </button>
+              </div>
+            );
+          })}
+      </div>
+      {status === "ready" && (
+        <div className="flex items-center justify-end border-t border-line px-4 py-3">
+          <button
+            type="button"
+            onClick={save}
+            disabled={saving || !dirty}
+            className="rounded-md border border-line px-3 py-1.5 text-[13px] text-muted transition enabled:hover:border-line2 enabled:hover:text-ink disabled:opacity-40"
+          >
+            {saving ? "Saving…" : "Save changes"}
           </button>
         </div>
-        <p className="px-5 pt-3 text-[12px] leading-relaxed text-faint">
-          Daily answer limit per account. Leave a box blank to use the default ({defaultCap}).
-        </p>
-        <div className="flex-1 overflow-y-auto px-3 py-3">
-          {status === "loading" && <p className="px-2 py-6 text-center text-sm text-faint">Loading…</p>}
-          {status === "error" && <p className="px-2 py-6 text-center text-sm text-danger">{err}</p>}
-          {status === "ready" && rows.length === 0 && <p className="px-2 py-6 text-center text-sm text-faint">No accounts yet.</p>}
-          {status === "ready" &&
-            rows.map((u) => (
-              <AdminRow key={u.uid} user={u} defaultCap={defaultCap} saving={savingUid === u.uid} onSave={(cap) => saveCap(u.uid, cap)} />
-            ))}
-        </div>
-      </div>
-    </div>
+      )}
+    </>
   );
 }
 

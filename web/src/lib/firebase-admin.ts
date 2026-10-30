@@ -198,3 +198,26 @@ export async function setUserCap(uid: string, cap: number | null): Promise<void>
   });
   if (!r.ok) throw new Error(`set cap failed: ${r.status}`);
 }
+
+// Channels hidden from non-admin accounts, stored as one list on config/visibility.
+const VIS_DOC = `${FS_DB}/config/visibility`;
+
+export async function getHiddenChannels(): Promise<string[]> {
+  const token = await accessToken();
+  const r = await fetch(VIS_DOC, { headers: { Authorization: `Bearer ${token}` } });
+  if (r.status === 404) return [];
+  if (!r.ok) throw new Error(`visibility read failed: ${r.status}`);
+  const j = (await r.json()) as { fields?: { hidden?: { arrayValue?: { values?: { stringValue?: string }[] } } } };
+  return (j.fields?.hidden?.arrayValue?.values || []).map((v) => v.stringValue || "").filter(Boolean);
+}
+
+export async function setHiddenChannels(slugs: string[]): Promise<void> {
+  const token = await accessToken();
+  const values = slugs.map((s) => ({ stringValue: s }));
+  const r = await fetch(`${VIS_DOC}?updateMask.fieldPaths=hidden`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ fields: { hidden: { arrayValue: { values } } } }),
+  });
+  if (!r.ok) throw new Error(`visibility write failed: ${r.status}`);
+}

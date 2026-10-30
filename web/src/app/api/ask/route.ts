@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { uidFromAuthHeader, consumeDaily } from "../../../lib/firebase-admin";
+import { verifyIdToken, consumeDaily } from "../../../lib/firebase-admin";
+import { allowedChannels } from "../../../lib/channels";
 
 // Runs server-side only (Node runtime by default): the brain URL and key never reach the browser.
 const BRAIN_URL = process.env.BRAIN_URL || "http://127.0.0.1:8000";
@@ -7,8 +8,9 @@ const BRAIN_KEY = process.env.BRAIN_KEY || "";
 
 export async function POST(req: NextRequest) {
   // only signed-in users may ask (it spends real money), and only within their daily allowance
-  const uid = await uidFromAuthHeader(req.headers.get("authorization"));
-  if (!uid) return NextResponse.json({ error: "Please sign in to ask." }, { status: 401 });
+  const auth = await verifyIdToken(req.headers.get("authorization"));
+  if (!auth) return NextResponse.json({ error: "Please sign in to ask." }, { status: 401 });
+  const uid = auth.uid;
 
   let body: { question?: string; channels?: string[]; mode?: string } = {};
   try {
@@ -38,6 +40,21 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ error: "Could not check your daily limit — try again." }, { status: 503 });
   }
 
+  // restrict to the channels this account may search (admins are unrestricted)
+  let effectiveChannels: string[] | undefined;
+  try {
+    const allow = await allowedChannels(auth.admin, channels);
+    if (allow.blocked) {
+      return NextResponse.json(
+        { q: question, empty: true, answer: null, sources: [], coverage: { moments: 0, videos: 0, channels: 0 }, remaining },
+        { status: 200 }
+      );
+    }
+    effectiveChannels = allow.channels;
+  } catch {
+    return NextResponse.json({ error: "Could not check channel access — try again." }, { status: 503 });
+  }
+
   const clientIp = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim();
   try {
     const r = await fetch(`${BRAIN_URL}/ask`, {
@@ -47,7 +64,7 @@ export async function POST(req: NextRequest) {
         ...(BRAIN_KEY ? { "X-Brain-Key": BRAIN_KEY } : {}),
         ...(clientIp ? { "X-Client-IP": clientIp } : {}),
       },
-      body: JSON.stringify({ question, channels, mode }),
+      body: JSON.stringify({ question, channels: effectiveChannels, mode }),
     });
     const data = await r.json().catch(() => ({ error: "The brain returned an unexpected response." }));
     if (data && typeof data === "object") (data as { remaining?: number }).remaining = remaining;
