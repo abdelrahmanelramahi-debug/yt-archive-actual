@@ -439,6 +439,7 @@ export default function Home() {
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const { user, loading: authLoading } = useAuth();
   const [usedToday, setUsedToday] = useState(0);
+  const [dailyCap, setDailyCap] = useState(DAILY_CAP); // per-account; an admin can raise it
   const [channels, setChannels] = useState<Channel[]>([]);
   const [modes, setModes] = useState<Mode[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
@@ -447,6 +448,8 @@ export default function Home() {
   const [sidebarOpen, setSidebarOpen] = useState(true); // open by default (desktop)
   const [chats, setChats] = useState<ChatDoc[]>([]);
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+  const [isAdmin, setIsAdmin] = useState(false);
+  const [adminOpen, setAdminOpen] = useState(false);
 
   // start collapsed on phones (where it's a full-screen overlay)
   useEffect(() => {
@@ -482,8 +485,9 @@ export default function Home() {
     return onSnapshot(
       doc(db, "users", user.uid),
       (snap) => {
-        const d = snap.data() as { day?: string; count?: number } | undefined;
+        const d = snap.data() as { day?: string; count?: number; cap?: number } | undefined;
         setUsedToday(d && d.day === today ? d.count ?? 0 : 0);
+        setDailyCap(typeof d?.cap === "number" && d.cap > 0 ? d.cap : DAILY_CAP);
       },
       () => setUsedToday(0)
     );
@@ -501,6 +505,30 @@ export default function Home() {
       (snap) => setChats(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<ChatDoc, "id">) }))),
       () => setChats([])
     );
+  }, [user]);
+
+  // is this account an admin? (only controls whether the admin panel is offered; the server
+  // re-checks on every admin action, so this can't grant anything on its own)
+  useEffect(() => {
+    if (!user) {
+      setIsAdmin(false);
+      return;
+    }
+    let alive = true;
+    (async () => {
+      try {
+        const token = await idToken();
+        if (!token) return;
+        const r = await fetch("/api/admin/me", { headers: { Authorization: `Bearer ${token}` } });
+        const d = await r.json().catch(() => ({}));
+        if (alive) setIsAdmin(!!d.admin);
+      } catch {
+        /* ignore */
+      }
+    })();
+    return () => {
+      alive = false;
+    };
   }, [user]);
 
   // save one answered question to history; load / delete past ones from the sidebar
@@ -774,7 +802,11 @@ export default function Home() {
         onNew={newChat}
         email={user.email ?? ""}
         usedToday={usedToday}
+        dailyCap={dailyCap}
+        isAdmin={isAdmin}
+        onOpenAdmin={() => setAdminOpen(true)}
       />
+      {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
       <div className={`transition-[margin] duration-200 ${sidebarOpen ? "sm:ml-[264px]" : ""}`}>
         <main className={`mx-auto w-full max-w-3xl px-5 ${landing ? "pb-10" : "pb-28"}`}>
           {/* top bar: open the sidebar (always on phones; on desktop only when it's collapsed) */}
@@ -990,6 +1022,9 @@ function Sidebar({
   onNew,
   email,
   usedToday,
+  dailyCap,
+  isAdmin,
+  onOpenAdmin,
 }: {
   open: boolean;
   onToggle: () => void;
@@ -1001,6 +1036,9 @@ function Sidebar({
   onNew: () => void;
   email: string;
   usedToday: number;
+  dailyCap: number;
+  isAdmin: boolean;
+  onOpenAdmin: () => void;
 }) {
   return (
     <>
@@ -1070,11 +1108,23 @@ function Sidebar({
             <span>Theme</span>
             <ThemeSelector />
           </div>
+          {isAdmin && (
+            <button
+              type="button"
+              onClick={onOpenAdmin}
+              className="flex w-full items-center gap-2 border-t border-line pt-2.5 text-left text-[13px] text-muted transition hover:text-ink"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <path d="M12 3 4 6v6c0 4.5 3.2 7.3 8 9 4.8-1.7 8-4.5 8-9V6l-8-3Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+              </svg>
+              Admin
+            </button>
+          )}
           <div className="flex items-center justify-between gap-2 border-t border-line pt-2.5">
             <div className="min-w-0">
               <p className="truncate text-[12px] text-ink" title={email}>{email || "Signed in"}</p>
               <p className="text-[11px] text-faint">
-                {usedToday}/{DAILY_CAP} answers today
+                {usedToday}/{dailyCap} answers today
               </p>
             </div>
             <button type="button" onClick={() => signOutUser()} aria-label="Sign out" title="Sign out" className="shrink-0 rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink">
@@ -1086,6 +1136,121 @@ function Sidebar({
         </div>
       </aside>
     </>
+  );
+}
+
+/* Admin-only: raise or reset each account's per-day answer limit. Every action is re-checked
+   server-side, so this panel can't grant anything the caller isn't already allowed to do. */
+type AdminUser = { uid: string; email: string; cap: number | null; usedToday: number };
+
+function AdminPanel({ onClose }: { onClose: () => void }) {
+  const [rows, setRows] = useState<AdminUser[]>([]);
+  const [defaultCap, setDefaultCap] = useState(DAILY_CAP);
+  const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
+  const [err, setErr] = useState("");
+  const [savingUid, setSavingUid] = useState<string | null>(null);
+
+  useEffect(() => {
+    let alive = true;
+    (async () => {
+      try {
+        const token = await idToken();
+        const r = await fetch("/api/admin/users", { headers: { Authorization: `Bearer ${token}` } });
+        const d = await r.json().catch(() => ({}));
+        if (!alive) return;
+        if (!r.ok) {
+          setErr(d.error || "Couldn't load accounts.");
+          setStatus("error");
+          return;
+        }
+        setRows(d.users || []);
+        setDefaultCap(d.defaultCap ?? DAILY_CAP);
+        setStatus("ready");
+      } catch {
+        if (alive) {
+          setErr("Couldn't reach the server.");
+          setStatus("error");
+        }
+      }
+    })();
+    return () => {
+      alive = false;
+    };
+  }, []);
+
+  async function saveCap(uid: string, cap: number | null) {
+    setSavingUid(uid);
+    try {
+      const token = await idToken();
+      const r = await fetch("/api/admin/cap", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ uid, cap }),
+      });
+      if (r.ok) setRows((rs) => rs.map((u) => (u.uid === uid ? { ...u, cap } : u)));
+    } finally {
+      setSavingUid(null);
+    }
+  }
+
+  return (
+    <div className="fixed inset-0 z-50 flex items-center justify-center p-4" role="dialog" aria-modal>
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} aria-hidden />
+      <div className="relative z-10 flex max-h-[85vh] w-full max-w-lg flex-col overflow-hidden rounded-2xl border border-line bg-raised shadow-xl">
+        <div className="flex items-center justify-between border-b border-line px-5 py-3.5">
+          <h2 className="font-serif text-lg text-ink">Accounts</h2>
+          <button type="button" onClick={onClose} aria-label="Close" className="rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink">
+            <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M6 6l12 12M18 6 6 18" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+            </svg>
+          </button>
+        </div>
+        <p className="px-5 pt-3 text-[12px] leading-relaxed text-faint">
+          Daily answer limit per account. Leave a box blank to use the default ({defaultCap}).
+        </p>
+        <div className="flex-1 overflow-y-auto px-3 py-3">
+          {status === "loading" && <p className="px-2 py-6 text-center text-sm text-faint">Loading…</p>}
+          {status === "error" && <p className="px-2 py-6 text-center text-sm text-danger">{err}</p>}
+          {status === "ready" && rows.length === 0 && <p className="px-2 py-6 text-center text-sm text-faint">No accounts yet.</p>}
+          {status === "ready" &&
+            rows.map((u) => (
+              <AdminRow key={u.uid} user={u} defaultCap={defaultCap} saving={savingUid === u.uid} onSave={(cap) => saveCap(u.uid, cap)} />
+            ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function AdminRow({ user, defaultCap, saving, onSave }: { user: AdminUser; defaultCap: number; saving: boolean; onSave: (cap: number | null) => void }) {
+  const [val, setVal] = useState(user.cap != null ? String(user.cap) : "");
+  const norm = val.trim() === "" ? null : Number(val);
+  const dirty = norm !== user.cap;
+  return (
+    <div className="flex items-center gap-2 rounded-lg px-2 py-2 hover:bg-line/20">
+      <div className="min-w-0 flex-1">
+        <p className="truncate text-[13px] text-ink" title={user.email}>{user.email || user.uid}</p>
+        <p className="text-[11px] text-faint">
+          {user.usedToday}/{user.cap ?? defaultCap} today{user.cap == null ? " · default" : ""}
+        </p>
+      </div>
+      <input
+        inputMode="numeric"
+        value={val}
+        onChange={(e) => setVal(e.target.value.replace(/[^0-9]/g, ""))}
+        placeholder={String(defaultCap)}
+        aria-label={`Daily limit for ${user.email || user.uid}`}
+        className="w-16 rounded-md border border-line bg-paper px-2 py-1 text-right text-[13px] text-ink outline-none focus:border-line2"
+      />
+      <button
+        type="button"
+        onClick={() => onSave(norm)}
+        disabled={saving || !dirty}
+        className="shrink-0 rounded-md border border-line px-2.5 py-1 text-[12px] text-muted transition enabled:hover:border-line2 enabled:hover:text-ink disabled:opacity-40"
+      >
+        {saving ? "…" : "Save"}
+      </button>
+    </div>
   );
 }
 

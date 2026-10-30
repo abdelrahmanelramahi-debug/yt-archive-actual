@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { uidFromAuthHeader, consumeDaily, DAILY_CAP } from "../../../../lib/firebase-admin";
+import { uidFromAuthHeader, consumeDaily } from "../../../../lib/firebase-admin";
 
 // Streams the brain's Server-Sent Events straight through to the browser. Runs server-side only,
 // so the brain URL + key never reach the client. The page falls back to /api/ask on any failure.
@@ -27,18 +27,17 @@ export async function POST(req: NextRequest) {
   const channels = Array.isArray(body?.channels) ? body.channels : undefined;
   const mode = typeof body?.mode === "string" ? body.mode : undefined;
 
-  // reserve one of today's free answers before spending on Claude
-  let remaining: number;
+  // reserve one of today's free answers before spending on Claude (cap is per-account)
   try {
-    remaining = await consumeDaily(uid);
+    const res = await consumeDaily(uid);
+    if (res.remaining < 0) {
+      return NextResponse.json(
+        { error: `You've used your ${res.cap} free answers for today. They reset at midnight (UTC).` },
+        { status: 429 }
+      );
+    }
   } catch {
     return NextResponse.json({ error: "Could not check your daily limit — try again." }, { status: 503 });
-  }
-  if (remaining < 0) {
-    return NextResponse.json(
-      { error: `You've used your ${DAILY_CAP} free answers for today. They reset at midnight (UTC).` },
-      { status: 429 }
-    );
   }
 
   const clientIp = (req.headers.get("x-forwarded-for") || "").split(",")[0].trim();
