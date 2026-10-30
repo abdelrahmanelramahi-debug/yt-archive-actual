@@ -4033,8 +4033,9 @@ def answer_question_stream(ctx, q, channels=None, mode=None):
     cite_re = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
     def new_sources(text):
-        # emit each cited moment's source card the moment its citation first appears (in order),
-        # so the evidences stream in alongside the answer instead of all landing at the end
+        # emit each cited moment's source card, in first-citation order. Resolving a source reads the
+        # transcript window (sometimes from SQLite), so we do this AFTER the answer has finished
+        # streaming - doing it inline stalled the token stream each time a citation closed.
         for grp in cite_re.findall(text):
             for x in re.findall(r"\d+", grp):
                 n = int(x)
@@ -4046,11 +4047,9 @@ def answer_question_stream(ctx, q, channels=None, mode=None):
         if kind == "delta":
             yield ("delta", payload)
             answer += payload
-            if "]" in payload:  # a citation may have just closed
-                yield from new_sources(answer)
         else:  # ('done', (full_text, usd))
             answer, reduce_cost = payload
-    yield from new_sources(answer)  # final sweep for any citation the stream closed at the very end
+    yield from new_sources(answer)  # sources stream in after the full answer (keeps the text smooth)
     cov_c = len({candidates[n - 1].get("channel") for n in sorted(emitted)}) or len(ctx["scope"])
     yield ("done", {"usd": map_cost + reduce_cost,
                     "coverage": {"moments": len(candidates),

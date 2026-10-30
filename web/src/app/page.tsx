@@ -682,6 +682,19 @@ export default function Home() {
     let gotDelta = false;
     let done: { coverage: Coverage; cost_usd?: number } | null = null;
     const EMPTY_COV: Coverage = { moments: 0, videos: 0, channels: 0 };
+    // Coalesce token updates to one render per frame — re-parsing the whole answer on every token
+    // janks the stream on phones.
+    let rafPending = false;
+    const flush = () => {
+      rafPending = false;
+      setStreamText(acc);
+    };
+    const scheduleRender = () => {
+      if (!rafPending) {
+        rafPending = true;
+        requestAnimationFrame(flush);
+      }
+    };
 
     for (;;) {
       const { done: fin, value } = await reader.read();
@@ -710,10 +723,10 @@ export default function Home() {
           if (!gotDelta) setStatus("streaming");
           gotDelta = true;
           acc += obj.text || "";
-          setStreamText(acc);
+          scheduleRender();
         } else if (ev === "source") {
+          // the brain now streams sources after the answer; collect them and show them once it's done
           srcs.push(obj as Source);
-          setStreamSources([...srcs]);
         } else if (ev === "empty") {
           setResult({ q: text, empty: true, answer: null, sources: [], coverage: EMPTY_COV });
           setStatus("done");
@@ -979,7 +992,7 @@ export default function Home() {
           {status === "loading" && <Loading stage={stage} />}
 
           {status === "streaming" && (
-            <StreamingAnswer text={streamText} sources={streamSources} question={asked ?? undefined} onCite={scrollToSource} />
+            <StreamingAnswer text={streamText} question={asked ?? undefined} onCite={scrollToSource} />
           )}
 
           {status === "error" && (
@@ -1406,7 +1419,9 @@ function Loading({ stage }: { stage: number }) {
 
 /* The answer as it streams in, with a blinking caret, and the evidences appearing beneath it as
    the answer references them. AnswerView takes over (with the cost line) once the stream finishes. */
-function StreamingAnswer({ text, sources, question, onCite }: { text: string; sources: Source[]; question?: string; onCite: (n: number) => void }) {
+function StreamingAnswer({ text, question, onCite }: { text: string; question?: string; onCite: (n: number) => void }) {
+  // The evidences are intentionally not shown here — they stream in after the answer and appear once
+  // it's done, so the text stays smooth while it writes.
   return (
     <div className="fade-up mt-6">
       <article className="max-w-[66ch] text-[16px] leading-[1.8] text-ink">
@@ -1416,7 +1431,6 @@ function StreamingAnswer({ text, sources, question, onCite }: { text: string; so
           aria-hidden
         />
       </article>
-      <SourcesList sources={sources} />
     </div>
   );
 }
@@ -1668,24 +1682,18 @@ function renderAnswer(text: string, onCite: (n: number) => void) {
   return out;
 }
 
-/* inline: **bold** and [n] / [n, m] citations */
+/* inline: **bold** (may contain *italic*), *italic*, and [n] / [n, m] citations.
+   Bold is matched lazily so it spans nested single-* italics; italics are parsed within. */
 function inline(text: string, key: string, onCite: (n: number) => void) {
-  // split on bold and citation tokens, keeping them
-  const parts = text.split(/(\*\*[^*]+\*\*|\[\d+(?:\s*,\s*\d+)*\])/g).filter(Boolean);
-  return parts.map((p, i) => {
-    const bold = p.match(/^\*\*([^*]+)\*\*$/);
-    if (bold) {
-      return (
-        <strong key={`${key}-${i}`} className="font-semibold text-ink">
-          {bold[1]}
-        </strong>
-      );
-    }
+  const nodes: React.ReactNode[] = [];
+  // 1) pull out citation chips first (they don't nest with emphasis)
+  const parts = text.split(/(\[\d+(?:\s*,\s*\d+)*\])/g).filter(Boolean);
+  parts.forEach((p, pi) => {
     const cite = p.match(/^\[(\d+(?:\s*,\s*\d+)*)\]$/);
     if (cite) {
       const nums = cite[1].split(",").map((x) => parseInt(x.trim(), 10));
-      return (
-        <span key={`${key}-${i}`} className="cites">
+      nodes.push(
+        <span key={`${key}-c${pi}`} className="cites">
           {nums.map((n, j) => (
             <span key={j}>
               <sup className="cite" onClick={() => onCite(n)} title={`Jump to source ${n}`}>
@@ -1696,7 +1704,40 @@ function inline(text: string, key: string, onCite: (n: number) => void) {
           ))}
         </span>
       );
+      return;
     }
-    return <span key={`${key}-${i}`}>{p}</span>;
+    // 2) bold spans (lazy, so **a *b* c** is one bold with an italic inside)
+    p.split(/(\*\*.+?\*\*)/g)
+      .filter(Boolean)
+      .forEach((seg, si) => {
+        const b = seg.match(/^\*\*(.+?)\*\*$/);
+        if (b) {
+          nodes.push(
+            <strong key={`${key}-${pi}-b${si}`} className="font-semibold text-ink">
+              {italics(b[1], `${key}-${pi}-b${si}`)}
+            </strong>
+          );
+        } else {
+          italics(seg, `${key}-${pi}-${si}`).forEach((n) => nodes.push(n));
+        }
+      });
   });
+  return nodes;
+}
+
+/* the italic pass, used on plain text and inside bold */
+function italics(text: string, key: string) {
+  return text
+    .split(/(\*[^*]+\*)/g)
+    .filter(Boolean)
+    .map((seg, i) => {
+      const m = seg.match(/^\*([^*]+)\*$/);
+      return m ? (
+        <em key={`${key}-i${i}`} className="italic">
+          {m[1]}
+        </em>
+      ) : (
+        <span key={`${key}-i${i}`}>{seg}</span>
+      );
+    });
 }
