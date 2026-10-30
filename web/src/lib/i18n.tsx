@@ -106,6 +106,15 @@ const DICT: Record<Lang, Record<string, string>> = {
     "admin.couldntLoadAccounts": "Couldn't load accounts.",
     "admin.couldntLoadChannels": "Couldn't load channels.",
     "admin.couldntReach": "Couldn't reach the server.",
+
+    "whatsnew.title": "What's new",
+    "whatsnew.dismiss": "Got it",
+    "whatsnew.history.t": "Your question history",
+    "whatsnew.history.b": "Every question you ask is now saved in the sidebar — reopen any of them anytime.",
+    "whatsnew.arabic.t": "Arabic interface",
+    "whatsnew.arabic.b": "Switch the whole app between English and العربية with the toggle at the top.",
+    "whatsnew.answers.t": "Smoother answers",
+    "whatsnew.answers.b": "Answers now stream more smoothly and read more cleanly.",
   },
   ar: {
     "hero.title": "اسأل عبر الأرشيف",
@@ -206,6 +215,15 @@ const DICT: Record<Lang, Record<string, string>> = {
     "admin.couldntLoadAccounts": "تعذّر تحميل الحسابات.",
     "admin.couldntLoadChannels": "تعذّر تحميل القنوات.",
     "admin.couldntReach": "تعذّر الوصول إلى الخادم.",
+
+    "whatsnew.title": "ما الجديد",
+    "whatsnew.dismiss": "تمام",
+    "whatsnew.history.t": "سجلّ أسئلتك",
+    "whatsnew.history.b": "كل سؤال تطرحه يُحفَظ الآن في القائمة الجانبية — افتح أيًّا منها متى شئت.",
+    "whatsnew.arabic.t": "واجهة عربية",
+    "whatsnew.arabic.b": "بدّل التطبيق كله بين الإنجليزية والعربية من الزرّ في الأعلى.",
+    "whatsnew.answers.t": "إجابات أكثر سلاسة",
+    "whatsnew.answers.b": "تظهر الإجابات الآن بسلاسة أكبر وتُقرأ بوضوح أكثر.",
   },
 };
 

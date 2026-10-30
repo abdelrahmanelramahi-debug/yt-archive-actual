@@ -6,6 +6,7 @@ import { useAuth, signOutUser, idToken } from "../lib/auth";
 import { useLang, LangToggle } from "../lib/i18n";
 import { db } from "../lib/firebase";
 import SignIn from "./SignIn";
+import UpdatePopup from "./UpdatePopup";
 
 const DAILY_CAP = 20; // free answers per user per day (keep in sync with the server's cap)
 
@@ -819,6 +820,7 @@ export default function Home() {
         onOpenAdmin={() => setAdminOpen(true)}
       />
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
+      <UpdatePopup />
       <div className={`transition-[margin] duration-200 ${sidebarOpen ? "ltr:sm:ml-[264px] rtl:sm:mr-[264px]" : ""}`}>
         <main className={`mx-auto w-full max-w-3xl px-5 ${landing ? "pb-10" : "pb-28"}`}>
           {/* top bar: open the sidebar (always on phones; on desktop only when it's collapsed) */}
