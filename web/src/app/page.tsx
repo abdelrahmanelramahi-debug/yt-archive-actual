@@ -1151,6 +1151,11 @@ function Sidebar({
               </svg>
             </button>
           </div>
+          <div className="flex items-center gap-2 pt-0.5 text-[11px] text-faint">
+            <a href="/privacy" className="transition hover:text-ink">Privacy</a>
+            <span aria-hidden>·</span>
+            <a href="/terms" className="transition hover:text-ink">Terms</a>
+          </div>
         </div>
       </aside>
     </>

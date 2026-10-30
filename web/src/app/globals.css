@@ -89,6 +89,25 @@ body {
   min-height: 100dvh;
 }
 
+/* Legal pages (/privacy, /terms): quiet, readable long-form. */
+.legal {
+  color: var(--color-muted);
+  font-size: 15px;
+  line-height: 1.75;
+}
+.legal h2 {
+  color: var(--color-ink);
+  font-family: var(--font-fraunces), Georgia, serif;
+  font-size: 1.15rem;
+  font-weight: 500;
+  margin: 2rem 0 0.6rem;
+}
+.legal p { margin: 0.8rem 0; }
+.legal ul { margin: 0.8rem 0; padding-left: 1.25rem; list-style: disc; }
+.legal li { margin: 0.35rem 0; }
+.legal strong { color: var(--color-ink); font-weight: 600; }
+.legal a { color: var(--color-accent); text-decoration: underline; }
+
 ::selection {
   background: rgba(var(--c-accent-rgb), 0.16);
 }

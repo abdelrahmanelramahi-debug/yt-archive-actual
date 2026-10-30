@@ -108,6 +108,11 @@ export default function SignIn() {
             {mode === "up" ? "Sign in" : "Create one"}
           </button>
         </p>
+        <p className="mt-6 text-[11px] leading-relaxed text-faint">
+          By continuing you agree to our{" "}
+          <a href="/terms" className="underline transition hover:text-ink">Terms</a> and{" "}
+          <a href="/privacy" className="underline transition hover:text-ink">Privacy Policy</a>.
+        </p>
       </div>
     </main>
   );
