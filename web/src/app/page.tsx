@@ -427,7 +427,6 @@ export default function Home() {
   const [status, setStatus] = useState<"idle" | "loading" | "streaming" | "done" | "error">("idle");
   const [result, setResult] = useState<Answer | null>(null);
   const [streamText, setStreamText] = useState(""); // the answer so far, while it streams
-  const [streamSources, setStreamSources] = useState<Source[]>([]); // evidences, as they stream in
   const [live, setLive] = useState(false); // a stream is in flight (so the stage copy follows events)
   const [error, setError] = useState<string>("");
   const [stage, setStage] = useState(0);
@@ -564,7 +563,6 @@ export default function Home() {
     setResult({ q: c.q, empty: false, answer: c.answer, sources: c.sources || [], coverage: c.coverage, cost_usd: c.cost_usd ?? undefined });
     setStatus("done");
     setStreamText("");
-    setStreamSources([]);
     setError("");
     setReturnY(null);
     setCurrentChatId(c.id);
@@ -627,7 +625,6 @@ export default function Home() {
     setStatus("loading");
     setStage(0);
     setStreamText("");
-    setStreamSources([]);
     setResult(null);
     setError("");
     setReturnY(null);
@@ -807,7 +804,6 @@ export default function Home() {
     setError("");
     setQ("");
     setStreamText("");
-    setStreamSources([]);
     setReturnY(null);
     setCurrentChatId(null);
     if (window.innerWidth < 640) setSidebarOpen(false);
@@ -1012,8 +1008,7 @@ export default function Home() {
             <h2 dir="auto" className="min-w-0 font-serif text-[1.4rem] font-medium leading-snug text-ink">
               {asked}
             </h2>
-            {(status === "done" && result && !result.empty && result.sources.length > 0) ||
-            (status === "streaming" && streamSources.length > 0) ? (
+            {status === "done" && result && !result.empty && result.sources.length > 0 ? (
               <button
                 type="button"
                 onClick={() => document.getElementById("sources")?.scrollIntoView({ behavior: "smooth", block: "start" })}

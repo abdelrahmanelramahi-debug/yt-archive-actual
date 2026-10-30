@@ -23,21 +23,6 @@ const JWKS = createRemoteJWKSet(
   new URL("https://www.googleapis.com/service_accounts/v1/jwk/securetoken@system.gserviceaccount.com")
 );
 
-// Verify the Firebase ID token from the Authorization header; returns the uid, or null if invalid.
-export async function uidFromAuthHeader(authHeader: string | null): Promise<string | null> {
-  const m = (authHeader || "").match(/^Bearer\s+(.+)$/i);
-  if (!m) return null;
-  try {
-    const { payload } = await jwtVerify(m[1], JWKS, {
-      issuer: `https://securetoken.google.com/${PROJECT_ID}`,
-      audience: PROJECT_ID,
-    });
-    return (payload.sub as string) || null;
-  } catch {
-    return null;
-  }
-}
-
 // A Google OAuth access token minted from the service account, cached ~1h per scope.
 const tokenCache = new Map<string, { token: string; exp: number }>();
 async function accessToken(scope: string = SCOPE_DATASTORE): Promise<string> {
