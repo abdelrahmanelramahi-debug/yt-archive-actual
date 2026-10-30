@@ -1884,11 +1884,11 @@ function renderAnswer(text: string, onCite: (n: number) => void) {
       }
       const k = key++;
       out.push(
-        <ul key={k} className="my-3 space-y-1.5 pl-1">
+        <ul key={k} className="my-3 space-y-1.5 ps-1">
           {items.map((it, li) => (
             <li key={li} dir="auto" className="flex gap-2.5">
               <span className="mt-[0.7em] h-1 w-1 shrink-0 rounded-full bg-gold" />
-              <span>{inline(it, `${k}-${li}`, onCite)}</span>
+              <span className="min-w-0 flex-1">{inline(it, `${k}-${li}`, onCite)}</span>
             </li>
           ))}
         </ul>

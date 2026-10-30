@@ -3701,15 +3701,17 @@ ROUTE_MARGIN = 0.10
 
 MAP_PROMPT = """Question: {q}
 
-Below are numbered transcript excerpts from Islamic lectures and Q&A (auto-generated captions, so wording and names may be garbled; ">>" marks a change of speaker). For EACH excerpt that helps answer the question, write ONE concise line: the relevant point, with a short key quote if useful, ending with its number in brackets, e.g. [12]. Skip excerpts that don't address the question. If none are relevant, reply with exactly: NONE
+Below are numbered transcript excerpts from Islamic lectures and Q&A (auto-generated captions, so wording and names may be garbled; ">>" marks a change of speaker). Each excerpt begins with its number and the channel it is from, like "[12] ChannelName | ...". For EACH excerpt that helps answer the question, write ONE concise line: start with the channel in parentheses, then the relevant point (with a short key quote if useful), ending with its number in brackets, e.g. (ChannelName) ... [12]. Skip excerpts that don't address the question. If none are relevant, reply with exactly: NONE
 
 {batch}"""
 
-REDUCE_PROMPT = """You answer questions about these YouTube channels using the findings below: {channels}
-Each finding was distilled from a transcript excerpt and ends with that excerpt's number, like [3]. The captions are auto-generated, so names and Arabic terms can be garbled.
+REDUCE_PROMPT = """You report what these YouTube channels say, using the findings below: {channels}
+Each finding starts with the channel it came from and ends with its excerpt number, like [3]. The captions are auto-generated, so names and Arabic terms can be garbled.
 
-Write a thorough, well-organised answer to the question, using ALL the relevant findings:
-- Synthesise across them: give the full picture, grouping by theme, scholar, or over time where that helps. Don't stop at one or two points when more are supported.
+Write a thorough, well-organised answer to the question from the findings:
+- Attribute every point to the channel that said it — name the channel (and the speaker only if the finding makes it clear; don't invent names). Different channels and speakers may hold different views.
+- Do NOT flatten those differences: where they disagree, lay out each position distinctly, side by side. Do not resolve the disagreement, harmonise them, pick a side, or add a ruling of your own. You are reporting what was said, not giving a fatwa.
+- Group by theme or position where it helps, and use ALL the relevant findings; don't stop at one or two points when more are supported.
 - Put the excerpt number in square brackets after every claim, like [3] or [3, 7]. Only cite numbers that actually support the claim.
 - When a point turns on specific wording (especially Arabic), quote the key words briefly.
 - If the findings genuinely don't answer the question, say so plainly. Don't fill gaps from outside knowledge.
@@ -3721,12 +3723,13 @@ Findings:
 {findings}"""
 
 
-VERBATIM_PROMPT = """You are given numbered transcript excerpts from Islamic lectures and Q&A - the speakers' own words (auto-generated captions, so wording and names may be garbled; ">>" marks a change of speaker). Each excerpt begins with its number in brackets, like [3].
+VERBATIM_PROMPT = """You are given numbered transcript excerpts from Islamic lectures and Q&A - the speakers' own words (auto-generated captions, so wording and names may be garbled; ">>" marks a change of speaker). Each excerpt begins with its number and the channel it is from, like "[3] ChannelName | ...".
 
 Answer the question by QUOTING THE SPEAKERS VERBATIM, in their original language, exactly as in the excerpts:
 - Quote the speakers' own words directly. Do NOT paraphrase, summarise, or translate the quotes - keep every quote in its original language, word for word.
+- Lead each line with the quote itself (so its own language sets the line's direction), then an em-dash and the channel it is from, then the excerpt number in brackets. Name the speaker only if the excerpt makes it clear; otherwise say the speaker isn't identified. Don't invent names. For example: "<quote>" - ChannelName [3]
+- Different channels and speakers may disagree. Keep their quotes distinct and let them stand side by side; do not harmonise them, pick a side, or add a ruling of your own. You are reporting what was said, not giving a fatwa.
 - Add only MINIMAL connective text of your own - a brief lead-in, or a short link between quotes - and write any such words of your own in the same language as the question. Keep your own words to a minimum.
-- Put the excerpt's number in brackets right after each quote, like [3].
 - Use only the excerpts that actually address the question, in a sensible order. If none of them do, say so plainly, in the same language as the question.
 
 Question: {question}
