@@ -141,6 +141,8 @@ const DICT: Record<Lang, Record<string, string>> = {
     "whatsnew.comprehensive.b": "Answers now lay out each channel's stance in depth, with headings and quotes — if a matter is discussed in many places, you get all of them, not a sample.",
     "whatsnew.download.t": "Download transcripts",
     "whatsnew.download.b": "Every source now has a download button for that video's full transcript.",
+    "whatsnew.fixes.t": "Small fixes",
+    "whatsnew.fixes.b": "Tidied up answer alignment when English and Arabic are mixed, plus other minor polish.",
 
     "mode.custom": "Custom",
     "custom.title": "Custom depth — admin",
@@ -287,6 +289,8 @@ const DICT: Record<Lang, Record<string, string>> = {
     "whatsnew.comprehensive.b": "تعرض الإجابات الآن موقف كل قناة بالتفصيل، بعناوين واقتباسات — وإن نوقشت المسألة في مواضع كثيرة حصلت عليها كلها، لا عيّنة منها.",
     "whatsnew.download.t": "تنزيل النصوص",
     "whatsnew.download.b": "لكل مصدر الآن زرّ تنزيل لنصّ ذلك المقطع كاملًا.",
+    "whatsnew.fixes.t": "إصلاحات صغيرة",
+    "whatsnew.fixes.b": "ضبط محاذاة الإجابة عند خلط الإنجليزية والعربية، مع تحسينات طفيفة أخرى.",
 
     "mode.custom": "مخصّص",
     "custom.title": "عمق مخصّص — للمشرف",

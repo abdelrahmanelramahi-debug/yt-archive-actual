@@ -1864,7 +1864,7 @@ function StreamingAnswer({ text, question, onCite }: { text: string; question?: 
   // it's done, so the text stays smooth while it writes.
   return (
     <div className="fade-up mt-6">
-      <article className="max-w-[66ch] text-[16px] leading-[1.8] text-ink">
+      <article dir={answerDir(stripEchoedQuestion(text, question))} className="max-w-[66ch] text-[16px] leading-[1.8] text-ink">
         {renderAnswer(stripEchoedQuestion(text, question), onCite)}
         <span
           className="ml-0.5 inline-block h-[1.05em] w-[2px] translate-y-[0.18em] animate-pulse bg-accent align-middle"
@@ -1903,7 +1903,7 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number, e?
   const cov = result.coverage;
   return (
     <div className="fade-up mt-6">
-      <article className="max-w-[66ch] text-[16px] leading-[1.8] text-ink">
+      <article dir={answerDir(stripEchoedQuestion(result.answer, result.q))} className="max-w-[66ch] text-[16px] leading-[1.8] text-ink">
         {renderAnswer(stripEchoedQuestion(result.answer, result.q), onCite)}
       </article>
 
@@ -2141,6 +2141,17 @@ function stripEchoedQuestion(answer: string, question?: string): string {
   return answer;
 }
 
+// One base direction for the whole answer, from its dominant script, so headings, bullets and quotes
+// all align the same way instead of each block picking its own (an English channel heading drifting
+// left over right-aligned Arabic quotes, or an Arabic speaker label flipping an English quote). Mixed
+// English/Arabic within a line is still ordered correctly by the browser's bidi algorithm. Verbatim
+// answers are mostly their quotes, so they follow the quotes' script.
+function answerDir(text: string): "rtl" | "ltr" {
+  const ar = (text.match(/[؀-ۿ]/g) || []).length;
+  const lat = (text.match(/[A-Za-z]/g) || []).length;
+  return ar > lat ? "rtl" : "ltr";
+}
+
 function renderAnswer(text: string, onCite: (n: number, e?: React.MouseEvent) => void) {
   const lines = text.split("\n");
   const out: React.ReactNode[] = [];
@@ -2157,7 +2168,7 @@ function renderAnswer(text: string, onCite: (n: number, e?: React.MouseEvent) =>
     const h = line.match(HEADING);
     if (h) {
       out.push(
-        <h3 key={key++} dir="auto" className="mb-2 mt-6 font-serif text-[1.15rem] font-medium text-ink">
+        <h3 key={key++} className="mb-2 mt-6 font-serif text-[1.15rem] font-medium text-ink">
           {inline(h[2], `h-${key}`, onCite)}
         </h3>
       );
@@ -2175,7 +2186,7 @@ function renderAnswer(text: string, onCite: (n: number, e?: React.MouseEvent) =>
       out.push(
         <ul key={k} className="my-3 space-y-1.5 ps-1">
           {items.map((it, li) => (
-            <li key={li} dir="auto" className="flex gap-2.5">
+            <li key={li} className="flex gap-2.5">
               <span className="mt-[0.7em] h-1 w-1 shrink-0 rounded-full bg-gold" />
               <span className="min-w-0 flex-1">{inline(it, `${k}-${li}`, onCite)}</span>
             </li>
@@ -2192,7 +2203,7 @@ function renderAnswer(text: string, onCite: (n: number, e?: React.MouseEvent) =>
       i++;
     }
     out.push(
-      <p key={key++} dir="auto" className="my-3.5">
+      <p key={key++} className="my-3.5">
         {inline(para.join(" "), `p-${key}`, onCite)}
       </p>
     );
@@ -2212,7 +2223,7 @@ function inline(text: string, key: string, onCite: (n: number, e?: React.MouseEv
     if (cite) {
       const nums = cite[1].split(",").map((x) => parseInt(x.trim(), 10));
       nodes.push(
-        <span key={`${key}-c${pi}`} className="cites">
+        <span key={`${key}-c${pi}`} dir="ltr" className="cites">
           {nums.map((n, j) => (
             <span key={j}>
               <sup className="cite" onClick={(e) => onCite(n, e)} title={`Jump to source ${n}`}>
