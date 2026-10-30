@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 32 32" role="img" aria-label="La Tafti">
+  <rect width="32" height="32" rx="7.5" fill="#0f6b57"/>
+  <text x="16" y="17" text-anchor="middle" dominant-baseline="central"
+        font-family="'SF Arabic','Geeza Pro','Noto Naskh Arabic','Segoe UI',sans-serif"
+        font-size="22" font-weight="700" fill="#faf8f3">لا</text>
+</svg>
