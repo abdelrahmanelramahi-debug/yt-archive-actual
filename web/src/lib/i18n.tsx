@@ -26,6 +26,9 @@ const DICT: Record<Lang, Record<string, string>> = {
     "controls.pickOne": "Pick at least one channel.",
     "controls.channelCount": "{n} channel{s}",
     "controls.perAnswer": "≈ {price} per answer",
+    "style.topical": "Topical",
+    "style.verbatim": "Verbatim",
+    "style.disclaimer": "Topical answer — synthesized by AI from the scholars' words. It can make mistakes and translations are approximate, so double-check against the original sources.",
 
     "stage.1": "Breaking your question into angles",
     "stage.2": "Searching a million moments",
@@ -144,6 +147,9 @@ const DICT: Record<Lang, Record<string, string>> = {
     "controls.pickOne": "اختر قناة واحدة على الأقل.",
     "controls.channelCount": "{n} قناة",
     "controls.perAnswer": "≈ {price} لكل إجابة",
+    "style.topical": "موضوعي",
+    "style.verbatim": "حرفي",
+    "style.disclaimer": "إجابة موضوعية — صاغها الذكاء الاصطناعي من كلام العلماء. قد تقع أخطاء والترجمات تقريبية، فراجِع المصادر الأصلية.",
 
     "stage.1": "نُحلّل سؤالك إلى زوايا",
     "stage.2": "نبحث في مليون لحظة",

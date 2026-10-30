@@ -12,7 +12,7 @@ const DAILY_CAP = 20; // free answers per user per day (keep in sync with the se
 const GUEST_CAP = 2; // free questions for a guest (anonymous) before they're asked to sign up
 
 // one saved question+answer in the user's history (sources stored light — no transcript windows)
-type ChatDoc = { id: string; q: string; answer: string; sources: Source[]; coverage: Coverage; cost_usd?: number | null };
+type ChatDoc = { id: string; q: string; answer: string; sources: Source[]; coverage: Coverage; cost_usd?: number | null; style?: string };
 
 type Line = { ts: string | null; text: string };
 type Source = {
@@ -440,6 +440,8 @@ export default function Home() {
   const [modes, setModes] = useState<Mode[]>([]);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [mode, setMode] = useState("standard");
+  const [style, setStyle] = useState<"topical" | "verbatim">("topical"); // how the answer is written
+  const [answerStyle, setAnswerStyle] = useState<"topical" | "verbatim">("topical"); // the displayed answer's style
   const [totals, setTotals] = useState<{ moments: number; videos: number } | null>(null);
   const [sidebarOpen, setSidebarOpen] = useState(true); // open by default (desktop)
   const [chats, setChats] = useState<ChatDoc[]>([]);
@@ -535,9 +537,20 @@ export default function Home() {
       await addDoc(collection(db, "users", user.uid, "chats"), {
         q,
         answer,
-        sources: sources.map((s) => ({ n: s.n, timestamp: s.timestamp, title: s.title, channel: s.channel ?? null, date: s.date ?? null, url: s.url })),
+        // keep the transcript window + cited line so a reopened chat shows its transcripts
+        sources: sources.map((s) => ({
+          n: s.n,
+          timestamp: s.timestamp,
+          title: s.title,
+          channel: s.channel ?? null,
+          date: s.date ?? null,
+          url: s.url,
+          context: (s.context ?? []).map((l) => ({ ts: l.ts ?? null, text: l.text })),
+          citedIdx: s.citedIdx ?? 0,
+        })),
         coverage,
         cost_usd: cost ?? null,
+        style: answerStyle,
         createdAt: serverTimestamp(),
       });
     } catch {
@@ -547,6 +560,7 @@ export default function Home() {
 
   function openChat(c: ChatDoc) {
     setAsked(c.q);
+    setAnswerStyle(c.style === "verbatim" ? "verbatim" : "topical");
     setResult({ q: c.q, empty: false, answer: c.answer, sources: c.sources || [], coverage: c.coverage, cost_usd: c.cost_usd ?? undefined });
     setStatus("done");
     setStreamText("");
@@ -609,6 +623,7 @@ export default function Home() {
       return;
     }
     setAsked(text);
+    setAnswerStyle(style);
     setStatus("loading");
     setStage(0);
     setStreamText("");
@@ -624,7 +639,7 @@ export default function Home() {
     }
     const headers = { "Content-Type": "application/json", Authorization: `Bearer ${token}` };
     const useSubset = channels.length > 0 && selected.size > 0 && selected.size < channels.length;
-    const payload = { question: text, mode, channels: useSubset ? [...selected] : undefined };
+    const payload = { question: text, mode, style, channels: useSubset ? [...selected] : undefined };
     // Prefer the streaming answer; fall back to the one-shot endpoint if a stream can't be opened.
     setLive(true);
     try {
@@ -913,15 +928,17 @@ export default function Home() {
           {/* controls ABOVE the bar: scope / cost on top, the pickers sit right above the bar */}
           {channels.length > 0 && (
             <>
-              {/* mobile: channel icon + mode drop-up on one compact line, right-aligned */}
-              <div className="mb-4 flex items-center justify-end gap-2 sm:hidden">
+              {/* compact dropdowns: always on phones, and on desktop too once a question is asked
+                  (the ask bar sits at the top then, so the expanded controls would just clutter) */}
+              <div className={`mb-4 flex items-center justify-end gap-2 ${landing ? "sm:hidden" : ""}`}>
+                <StyleToggle value={style} onChange={setStyle} />
                 <ChannelPicker channels={channels} selected={selected} onChange={setSelected} compact />
                 <ModeDropup modes={modes} mode={mode} onChange={setMode} />
                 {noneSelected && <span className="text-[13px] text-danger">{t("controls.pickChannel")}</span>}
               </div>
 
-              {/* desktop: channel + scope (left); mode + cost + explainer (right) */}
-              <div className="mb-3 hidden sm:flex sm:flex-row sm:items-end sm:justify-between sm:gap-3">
+              {/* desktop landing only: channel + scope (left); mode + cost + explainer (right) */}
+              <div className={landing ? "mb-3 hidden sm:flex sm:flex-row sm:items-end sm:justify-between sm:gap-3" : "hidden"}>
                 <div className="flex flex-col items-start gap-2">
                   {noneSelected ? (
                     <p className="text-[13px] text-danger">{t("controls.pickOne")}</p>
@@ -935,7 +952,10 @@ export default function Home() {
                 <div className="flex flex-col items-end gap-2">
                   <ModeExplainer modes={modes} />
                   <p className="text-[13px] text-gold2">{t("controls.perAnswer", { price: aed(modeUsd) })}</p>
-                  <ModePicker modes={modes} mode={mode} onChange={setMode} />
+                  <div className="flex items-center gap-2">
+                    <StyleToggle value={style} onChange={setStyle} />
+                    <ModePicker modes={modes} mode={mode} onChange={setMode} />
+                  </div>
                 </div>
               </div>
             </>
@@ -979,6 +999,15 @@ export default function Home() {
       {/* conversation area */}
       {asked && (
         <section className="mt-9">
+          {/* topical answers are AI-synthesized, so flag that up front (verbatim quotes don't need it) */}
+          {answerStyle === "topical" && (status === "streaming" || (status === "done" && result && !result.empty)) && (
+            <div dir="auto" className="mb-5 flex items-start gap-2 rounded-lg border border-gold/30 bg-gold/[0.05] px-3.5 py-2.5 text-[12.5px] leading-relaxed text-gold2">
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden className="mt-0.5 shrink-0">
+                <path d="M12 9v4m0 4h.01M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              <span>{t("style.disclaimer")}</span>
+            </div>
+          )}
           <div className="flex items-start justify-between gap-4">
             <h2 dir="auto" className="min-w-0 font-serif text-[1.4rem] font-medium leading-snug text-ink">
               {asked}
@@ -1547,6 +1576,25 @@ function AdminRow({
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/* Topical (synthesized, the default) vs. Verbatim (the speakers' own words, original language). */
+function StyleToggle({ value, onChange }: { value: "topical" | "verbatim"; onChange: (s: "topical" | "verbatim") => void }) {
+  const { t } = useLang();
+  return (
+    <div className="inline-flex shrink-0 rounded-lg border border-line bg-raised/60 p-0.5 text-[12px]">
+      {(["topical", "verbatim"] as const).map((s) => (
+        <button
+          key={s}
+          type="button"
+          onClick={() => onChange(s)}
+          className={`rounded-md px-2.5 py-1 transition ${value === s ? "bg-accent/12 font-medium text-accent" : "text-faint hover:text-ink"}`}
+        >
+          {t(`style.${s}`)}
+        </button>
+      ))}
     </div>
   );
 }

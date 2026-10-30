@@ -3721,6 +3721,20 @@ Findings:
 {findings}"""
 
 
+VERBATIM_PROMPT = """You are given numbered transcript excerpts from Islamic lectures and Q&A - the speakers' own words (auto-generated captions, so wording and names may be garbled; ">>" marks a change of speaker). Each excerpt begins with its number in brackets, like [3].
+
+Answer the question by QUOTING THE SPEAKERS VERBATIM, in their original language, exactly as in the excerpts:
+- Quote the speakers' own words directly. Do NOT paraphrase, summarise, or translate the quotes - keep every quote in its original language, word for word.
+- Add only MINIMAL connective text of your own - a brief lead-in, or a short link between quotes - and write any such words of your own in the same language as the question. Keep your own words to a minimum.
+- Put the excerpt's number in brackets right after each quote, like [3].
+- Use only the excerpts that actually address the question, in a sensible order. If none of them do, say so plainly, in the same language as the question.
+
+Question: {question}
+
+Excerpts:
+{quotes}"""
+
+
 MIDREDUCE_PROMPT = """Question: {q}
 
 Below are many findings distilled from transcript excerpts, each ending with its excerpt number like [3]. Condense them into a smaller, grouped set of points for the question — merge duplicates, but keep every distinct point AND its [n] citation numbers. No preamble.
@@ -3748,13 +3762,43 @@ def _decompose(anth, model, q):
     return out
 
 
+def _numbered_excerpts(candidates):
+    """The candidate moments as numbered raw excerpts ('[n] channel | "title" (date) at ts\\ntext').
+    Used both to feed the map step and to quote verbatim."""
+    return [f"[{n}] {c.get('channel') or ''} | \"{c['title']}\" ({c['date']}"
+            f"{', live' if c.get('type') == 'live' else ''}) at {c['timestamp']}\n{c['text']}"
+            for n, c in enumerate(candidates, 1)]
+
+
+def _cited_numbers(text, upper):
+    """The distinct [n] citation numbers appearing in `text`, in first-seen order, 1..upper."""
+    out, seen = [], set()
+    for grp in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", text):
+        for x in re.findall(r"\d+", grp):
+            n = int(x)
+            if 0 < n <= upper and n not in seen:
+                seen.add(n)
+                out.append(n)
+    return out
+
+
+def _reduce_prompt(q, candidates, findings, style, names, lang):
+    """Build the answer-model prompt. 'topical' (default) synthesises the findings; 'verbatim' quotes
+    the cited excerpts' own words (original language) with only minimal additions in the question's
+    language."""
+    if style == "verbatim":
+        numbered = _numbered_excerpts(candidates)
+        cited = _cited_numbers(findings, len(numbered))
+        block = "\n\n".join(numbered[n - 1] for n in cited) if cited else "\n\n".join(numbered[:40])
+        return VERBATIM_PROMPT.format(question=q, quotes=block)
+    return REDUCE_PROMPT.format(channels=names, language=lang, question=q, findings=findings)
+
+
 def _map_findings(anth, settings, q, candidates):
     """The 'map' half of the deep answer: the cheap tag model distills the candidate excerpts into a
     compact findings block in parallel, condensing in a middle layer when there are too many. Returns
     (findings_text, usd)."""
-    numbered = [f"[{n}] {c.get('channel') or ''} | \"{c['title']}\" ({c['date']}"
-                f"{', live' if c.get('type') == 'live' else ''}) at {c['timestamp']}\n{c['text']}"
-                for n, c in enumerate(candidates, 1)]
+    numbered = _numbered_excerpts(candidates)
     cost = [0.0]
     lock = Lock()
 
@@ -3781,13 +3825,12 @@ def _map_findings(anth, settings, q, candidates):
     return findings, cost[0]
 
 
-def _deep_answer(anth, settings, q, candidates, lang, names):
+def _deep_answer(anth, settings, q, candidates, lang, names, style=None):
     """Hierarchical map-reduce: _map_findings distills many excerpts (map), then the answer model
-    synthesises the cited answer (reduce) — so one answer can stand on hundreds of moments. Returns
-    (answer_text, usd)."""
+    writes the cited answer (reduce) — topical synthesis, or verbatim quotes. Returns (answer, usd)."""
     findings, cost = _map_findings(anth, settings, q, candidates)
     answer, u = call_claude(anth, settings["answer_model"],
-                            REDUCE_PROMPT.format(channels=names, language=lang, question=q, findings=findings), 7000)
+                            _reduce_prompt(q, candidates, findings, style, names, lang), 7000)
     return answer, cost + u
 
 
@@ -3987,10 +4030,10 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False):
     return candidates, queries
 
 
-def synthesize(ctx, q, candidates):
+def synthesize(ctx, q, candidates, style=None):
     """Write the cited answer from the candidate moments (the deep map-reduce). Returns
     {answer, usd, cited, coverage}. Raises on a Claude error (callers handle credit/billing)."""
-    answer, usd = _deep_answer(ctx["anth"], ctx["settings"], q, candidates, ctx["lang"], ctx["names"])
+    answer, usd = _deep_answer(ctx["anth"], ctx["settings"], q, candidates, ctx["lang"], ctx["names"], style)
     cited = sorted({int(n) for grp in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", answer)
                     for n in re.findall(r"\d+", grp) if 0 < int(n) <= len(candidates)})
     cov_c = len({candidates[n - 1].get("channel") for n in cited}) or len(ctx["scope"])
@@ -3999,25 +4042,27 @@ def synthesize(ctx, q, candidates):
                          "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}}
 
 
-def answer_question(ctx, q, channels=None, mode=None):
+def answer_question(ctx, q, channels=None, mode=None, style=None):
     """Retrieve + synthesize in one call: the whole deluxe answer as plain data (empty=True if nothing
-    matched). `channels` (slugs) limits the search; `mode` (quick/standard/deep) sets the depth.
-    No printing or file I/O - the CLI and the web server format and persist it themselves."""
+    matched). `channels` (slugs) limits the search; `mode` (quick/standard/deep) sets the depth;
+    `style` (topical/verbatim) sets how the answer is written. No printing or file I/O - the CLI and
+    the web server format and persist it themselves."""
     m = MODES.get(mode or DEFAULT_MODE, MODES[DEFAULT_MODE])
     candidates, queries = retrieve(ctx, q, channels=channels, cand_max=m["cand_max"],
                                    per_vid=m["per_video"], route=m.get("route", False))
     if not candidates:
         return {"q": q, "empty": True, "answer": None, "candidates": [], "cited": [], "queries": queries,
                 "coverage": {"moments": 0, "videos": 0, "channels": 0}, "usd": 0.0}
-    res = synthesize(ctx, q, candidates)
+    res = synthesize(ctx, q, candidates, style)
     return {"q": q, "empty": False, "candidates": candidates, "queries": queries, **res}
 
 
-def answer_question_stream(ctx, q, channels=None, mode=None):
+def answer_question_stream(ctx, q, channels=None, mode=None, style=None):
     """Streaming deluxe answer: a generator of (kind, payload) events for the website's live answer.
     Yields ('status', stage) as it searches then reads, many ('delta', text) as the answer writes,
     then one ('done', {...}) with the final answer, candidates and cited numbers - or ('empty', None)
-    when nothing matched. Same retrieval and map-reduce as answer_question; only the final write streams."""
+    when nothing matched. `style` (topical/verbatim) sets how the answer is written. Same retrieval and
+    map-reduce as answer_question; only the final write streams."""
     m = MODES.get(mode or DEFAULT_MODE, MODES[DEFAULT_MODE])
     yield ("status", "searching")
     candidates, _ = retrieve(ctx, q, channels=channels, cand_max=m["cand_max"],
@@ -4028,7 +4073,7 @@ def answer_question_stream(ctx, q, channels=None, mode=None):
     yield ("status", "reading")
     findings, map_cost = _map_findings(ctx["anth"], ctx["settings"], q, candidates)
     yield ("status", "writing")
-    prompt = REDUCE_PROMPT.format(channels=ctx["names"], language=ctx["lang"], question=q, findings=findings)
+    prompt = _reduce_prompt(q, candidates, findings, style, ctx["names"], ctx["lang"])
     answer, reduce_cost, emitted = "", 0.0, set()
     cite_re = re.compile(r"\[(\d+(?:\s*,\s*\d+)*)\]")
 
