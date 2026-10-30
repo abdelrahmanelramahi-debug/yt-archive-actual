@@ -3723,14 +3723,14 @@ Findings:
 {findings}"""
 
 
-VERBATIM_PROMPT = """You are given numbered transcript excerpts from Islamic lectures and Q&A - the speakers' own words (auto-generated captions, so wording and names may be garbled; ">>" marks a change of speaker). Each excerpt begins with its number and the channel it is from, like "[3] ChannelName | ...".
+VERBATIM_PROMPT = """You are given numbered transcript excerpts from Islamic lectures and Q&A - the speakers' own words (auto-generated captions, so wording and names may be garbled; ">>" marks a change of speaker). Each excerpt begins with its number, its channel, and the video title, like: [3] ChannelName | "Video title ..." (2020-10-17) at 11:42
 
 Answer the question by QUOTING THE SPEAKERS VERBATIM, in their original language, exactly as in the excerpts. Organise the answer by channel:
-- Group the quotes by the channel they came from. Lead each group with that channel's name as a heading on its own line, prefixed with "## ".
-- Under each channel, list its relevant quotes as bullet points (one quote per bullet). Lead a bullet with the speaker's name and a colon ONLY if the excerpt actually identifies the speaker; otherwise give just the quote. If quotes within a channel are clearly from different unidentified speakers, you may note that briefly. Never invent a speaker's name.
-- Quote the speakers' own words directly: do NOT paraphrase, summarise, or translate - keep every quote in its original language, word for word. Put the excerpt number in brackets right after each quote, like [3].
-- Different channels and speakers may disagree. Keep their quotes distinct; do not harmonise them, pick a side, or add a ruling of your own. You are reporting what was said, not giving a fatwa.
-- Any words of your own (a short lead-in, or a brief note) go in the same language as the question; keep them minimal.
+- Group the quotes by the channel they came from, and lead each group with that channel's name as a heading on its own line, prefixed with "## ".
+- Under each channel, list its relevant quotes as bullet points, one quote per bullet, and LEAD EVERY BULLET WITH THE SPEAKER'S NAME followed by a colon, then the quote. Work out who the speaker is from the video title (it usually names the lecturer, e.g. "...الشيخ خالد إسماعيل"), or from the channel name when the channel is itself a person, or from the excerpt's own words. If none of these identify the speaker, lead with a short "speaker not identified" note (in the question's language) instead of a name. Never invent or guess a name beyond what the title, channel, or excerpt supports.
+- Keep each quote word for word in its ORIGINAL language - do NOT paraphrase, summarise, or translate the quoted words. Put its excerpt number in brackets right after it, like [3].
+- EVERYTHING THAT IS NOT A VERBATIM QUOTE - the speaker names and labels, the lead-in, and any note - must be written in the same language as the question, transliterating an Arabic name into that language where needed. {language} Only the quoted words themselves stay in their original language.
+- Different channels and speakers may disagree. Keep their quotes distinct; do not harmonise them, pick a side, or add a ruling of your own. You are reporting what was said, not giving a fatwa. Keep any words of your own to a minimum.
 - Use only the excerpts that actually address the question. If none of them do, say so plainly, in the same language as the question.
 
 Question: {question}
@@ -3794,7 +3794,7 @@ def _reduce_prompt(q, candidates, findings, style, names, lang):
         numbered = _numbered_excerpts(candidates)
         cited = _cited_numbers(findings, len(numbered))
         block = "\n\n".join(numbered[n - 1] for n in cited) if cited else "\n\n".join(numbered[:40])
-        return VERBATIM_PROMPT.format(question=q, quotes=block)
+        return VERBATIM_PROMPT.format(question=q, quotes=block, language=lang)
     return REDUCE_PROMPT.format(channels=names, language=lang, question=q, findings=findings)
 
 
