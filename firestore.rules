@@ -1,10 +1,16 @@
 rules_version = '2';
 service cloud.firestore {
   match /databases/{database}/documents {
-    // a signed-in user can read only their own usage doc; all writes are server-side (Admin SDK bypasses rules)
     match /users/{uid} {
+      // a signed-in user reads only their own usage doc; the daily-cap count is written server-side only
       allow read: if request.auth != null && request.auth.uid == uid;
       allow write: if false;
+
+      // ...but a user owns their own chat history (saved from the client)
+      match /chats/{chatId} {
+        allow read, create, delete: if request.auth != null && request.auth.uid == uid;
+        allow update: if false;
+      }
     }
     match /{document=**} {
       allow read, write: if false;

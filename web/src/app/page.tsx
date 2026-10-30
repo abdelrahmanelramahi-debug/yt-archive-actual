@@ -1,12 +1,15 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { doc, onSnapshot } from "firebase/firestore";
+import { collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy, limit, serverTimestamp } from "firebase/firestore";
 import { useAuth, signOutUser, idToken } from "../lib/auth";
 import { db } from "../lib/firebase";
 import SignIn from "./SignIn";
 
 const DAILY_CAP = 20; // free answers per user per day (keep in sync with the server's cap)
+
+// one saved question+answer in the user's history (sources stored light — no transcript windows)
+type ChatDoc = { id: string; q: string; answer: string; sources: Source[]; coverage: Coverage; cost_usd?: number | null };
 
 type Line = { ts: string | null; text: string };
 type Source = {
@@ -441,6 +444,14 @@ export default function Home() {
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [mode, setMode] = useState("standard");
   const [totals, setTotals] = useState<{ moments: number; videos: number } | null>(null);
+  const [sidebarOpen, setSidebarOpen] = useState(true); // open by default (desktop)
+  const [chats, setChats] = useState<ChatDoc[]>([]);
+  const [currentChatId, setCurrentChatId] = useState<string | null>(null);
+
+  // start collapsed on phones (where it's a full-screen overlay)
+  useEffect(() => {
+    if (typeof window !== "undefined" && window.innerWidth < 640) setSidebarOpen(false);
+  }, []);
 
   // live daily usage for the signed-in user (the server writes it; the rules let a user read their own)
   useEffect(() => {
@@ -458,6 +469,60 @@ export default function Home() {
       () => setUsedToday(0)
     );
   }, [user]);
+
+  // the user's saved chat history (newest first), read live from their own subcollection
+  useEffect(() => {
+    if (!user) {
+      setChats([]);
+      return;
+    }
+    const qy = query(collection(db, "users", user.uid, "chats"), orderBy("createdAt", "desc"), limit(40));
+    return onSnapshot(
+      qy,
+      (snap) => setChats(snap.docs.map((d) => ({ id: d.id, ...(d.data() as Omit<ChatDoc, "id">) }))),
+      () => setChats([])
+    );
+  }, [user]);
+
+  // save one answered question to history; load / delete past ones from the sidebar
+  async function saveChat(q: string, answer: string | null, sources: Source[], coverage: Coverage, cost?: number) {
+    if (!user || !answer) return;
+    try {
+      await addDoc(collection(db, "users", user.uid, "chats"), {
+        q,
+        answer,
+        sources: sources.map((s) => ({ n: s.n, timestamp: s.timestamp, title: s.title, channel: s.channel ?? null, date: s.date ?? null, url: s.url })),
+        coverage,
+        cost_usd: cost ?? null,
+        createdAt: serverTimestamp(),
+      });
+    } catch {
+      /* best-effort: never block the answer on a history write */
+    }
+  }
+
+  function openChat(c: ChatDoc) {
+    setAsked(c.q);
+    setResult({ q: c.q, empty: false, answer: c.answer, sources: c.sources || [], coverage: c.coverage, cost_usd: c.cost_usd ?? undefined });
+    setStatus("done");
+    setStreamText("");
+    setStreamSources([]);
+    setError("");
+    setReturnY(null);
+    setCurrentChatId(c.id);
+    if (window.innerWidth < 640) setSidebarOpen(false);
+    window.scrollTo({ top: 0 });
+  }
+
+  async function deleteChat(id: string) {
+    if (!user) return;
+    if (currentChatId === id) newChat();
+    try {
+      await deleteDoc(doc(db, "users", user.uid, "chats", id));
+    } catch {
+      /* ignore */
+    }
+  }
 
   // load the channel list + depth modes for the pickers, once signed in
   useEffect(() => {
@@ -529,6 +594,8 @@ export default function Home() {
       }
       setResult(data);
       setStatus("done");
+      setCurrentChatId(null);
+      saveChat(text, data.answer, data.sources || [], data.coverage, data.cost_usd);
     } catch {
       setError("Could not reach the server.");
       setStatus("error");
@@ -618,6 +685,8 @@ export default function Home() {
       setResult({ q: text, empty: false, answer: acc, sources: srcs, coverage: done.coverage, cost_usd: done.cost_usd });
       setStatus("done");
       setLive(false);
+      setCurrentChatId(null);
+      saveChat(text, acc, srcs, done.coverage, done.cost_usd);
       return;
     }
     if (gotDelta) {
@@ -625,6 +694,8 @@ export default function Home() {
       setResult({ q: text, empty: false, answer: acc, sources: srcs, coverage: EMPTY_COV });
       setStatus("done");
       setLive(false);
+      setCurrentChatId(null);
+      saveChat(text, acc, srcs, EMPTY_COV);
       return;
     }
     throw new Error("no data"); // nothing arrived — let ask() fall back
@@ -635,14 +706,18 @@ export default function Home() {
     ask(q);
   }
 
-  // the logo returns to the landing hero (soft reset, no reload)
-  function goHome() {
+  // start a fresh question — the landing hero + empty ask bar (a soft reset, no reload)
+  function newChat() {
     setAsked(null);
     setResult(null);
     setStatus("idle");
     setError("");
     setQ("");
+    setStreamText("");
+    setStreamSources([]);
     setReturnY(null);
+    setCurrentChatId(null);
+    if (window.innerWidth < 640) setSidebarOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
 
@@ -668,37 +743,39 @@ export default function Home() {
   }
 
   return (
-    <main className={`mx-auto w-full max-w-3xl px-5 ${landing ? "pb-10" : "pb-28"}`}>
-      {/* header: identity + persistent cost */}
-      <header className="flex items-center justify-between py-6">
-        <button
-          type="button"
-          onClick={goHome}
-          aria-label="La Tafti — back to home"
-          className="-m-1 rounded-md p-1 transition hover:opacity-75"
-        >
-          <Wordmark />
-        </button>
-        <div className="flex items-center gap-2.5">
-          <span className="hidden text-xs text-faint sm:inline" title="Free answers left today">
-            {Math.max(0, DAILY_CAP - usedToday)}/{DAILY_CAP} today
-          </span>
-          <ThemeSelector />
-          <button
-            type="button"
-            onClick={() => signOutUser()}
-            aria-label="Sign out"
-            title={`${user.email ?? "Signed in"} — sign out`}
-            className="rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink"
-          >
-            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
-              <path d="M15 12H3m0 0 3.5-3.5M3 12l3.5 3.5M9 7V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2v-2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
-            </svg>
-          </button>
-        </div>
-      </header>
+    <>
+      <Sidebar
+        open={sidebarOpen}
+        onToggle={() => setSidebarOpen(false)}
+        onClose={() => setSidebarOpen(false)}
+        chats={chats}
+        currentChatId={currentChatId}
+        onOpenChat={openChat}
+        onDeleteChat={deleteChat}
+        onNew={newChat}
+        email={user.email ?? ""}
+        usedToday={usedToday}
+      />
+      <div className={`transition-[margin] duration-200 ${sidebarOpen ? "sm:ml-[264px]" : ""}`}>
+        <main className={`mx-auto w-full max-w-3xl px-5 ${landing ? "pb-10" : "pb-28"}`}>
+          {/* top bar: open the sidebar (always on phones; on desktop only when it's collapsed) */}
+          <div className="flex items-center gap-1 py-4 sm:py-5">
+            <button
+              type="button"
+              onClick={() => setSidebarOpen(true)}
+              aria-label="Open menu"
+              className={`-ml-1 rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink ${sidebarOpen ? "sm:hidden" : ""}`}
+            >
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <path d="M4 6h16M4 12h16M4 18h16" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" />
+              </svg>
+            </button>
+            <button type="button" onClick={newChat} aria-label="La Tafti" className="rounded-md p-1 transition hover:opacity-75 sm:hidden">
+              <Wordmark />
+            </button>
+          </div>
 
-      {/* hero + suggestions + ask (ask block anchored to the bottom of the viewport on landing) */}
+          {/* hero + suggestions + ask (ask block anchored to the bottom of the viewport on landing) */}
       <section className={landing ? "flex min-h-[calc(100dvh-6rem)] flex-col pt-6" : "pt-5"}>
         {landing && (
           <div className="fade-up mb-6 sm:mb-8">
@@ -875,7 +952,114 @@ export default function Home() {
           </svg>
         </button>
       )}
-    </main>
+        </main>
+      </div>
+    </>
+  );
+}
+
+/* Collapsible left panel (like an LLM): the user's saved chat history, a "new question" button,
+   and the display + account settings at the bottom. An overlay on phones, pinned on desktop. */
+function Sidebar({
+  open,
+  onToggle,
+  onClose,
+  chats,
+  currentChatId,
+  onOpenChat,
+  onDeleteChat,
+  onNew,
+  email,
+  usedToday,
+}: {
+  open: boolean;
+  onToggle: () => void;
+  onClose: () => void;
+  chats: ChatDoc[];
+  currentChatId: string | null;
+  onOpenChat: (c: ChatDoc) => void;
+  onDeleteChat: (id: string) => void;
+  onNew: () => void;
+  email: string;
+  usedToday: number;
+}) {
+  return (
+    <>
+      {open && <div onClick={onClose} className="fixed inset-0 z-30 bg-black/40 sm:hidden" aria-hidden />}
+      <aside
+        className={`fixed inset-y-0 left-0 z-40 flex w-[264px] flex-col border-r border-line bg-raised transition-transform duration-200 ${
+          open ? "translate-x-0" : "-translate-x-full"
+        }`}
+      >
+        <div className="flex items-center justify-between px-3 py-3">
+          <button type="button" onClick={onNew} aria-label="La Tafti — new question" className="-m-1 rounded-md p-1 transition hover:opacity-75">
+            <Wordmark />
+          </button>
+          <button type="button" onClick={onToggle} aria-label="Collapse sidebar" title="Collapse" className="rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink">
+            <svg width="17" height="17" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="m15 6-6 6 6 6" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+            </svg>
+          </button>
+        </div>
+
+        <div className="px-3 pb-2">
+          <button type="button" onClick={onNew} className="flex w-full items-center gap-2 rounded-lg border border-line bg-paper px-3 py-2 text-sm font-medium text-ink transition hover:border-line2">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <path d="M12 5v14M5 12h14" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+            New question
+          </button>
+        </div>
+
+        <nav className="flex-1 overflow-y-auto px-2 py-1">
+          {chats.length === 0 ? (
+            <p className="px-2 py-3 text-[12px] leading-relaxed text-faint">Your questions are saved here as you ask them.</p>
+          ) : (
+            chats.map((c) => (
+              <div
+                key={c.id}
+                className={`group/chat relative rounded-lg transition ${c.id === currentChatId ? "bg-line/60" : "hover:bg-line/30"}`}
+              >
+                <button type="button" onClick={() => onOpenChat(c)} dir="auto" title={c.q} className="block w-full truncate rounded-lg px-2.5 py-2 pr-7 text-left text-[13px] text-ink">
+                  {c.q}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => onDeleteChat(c.id)}
+                  aria-label="Delete question"
+                  title="Delete"
+                  className="absolute right-1 top-1/2 -translate-y-1/2 rounded p-1 text-faint opacity-0 transition hover:text-danger group-hover/chat:opacity-100"
+                >
+                  <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
+                    <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+                  </svg>
+                </button>
+              </div>
+            ))
+          )}
+        </nav>
+
+        <div className="space-y-2.5 border-t border-line p-3">
+          <div className="flex items-center justify-between text-[13px] text-muted">
+            <span>Theme</span>
+            <ThemeSelector />
+          </div>
+          <div className="flex items-center justify-between gap-2 border-t border-line pt-2.5">
+            <div className="min-w-0">
+              <p className="truncate text-[12px] text-ink" title={email}>{email || "Signed in"}</p>
+              <p className="text-[11px] text-faint">
+                {usedToday}/{DAILY_CAP} answers today
+              </p>
+            </div>
+            <button type="button" onClick={() => signOutUser()} aria-label="Sign out" title="Sign out" className="shrink-0 rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink">
+              <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <path d="M15 12H3m0 0 3.5-3.5M3 12l3.5 3.5M9 7V5a2 2 0 0 1 2-2h8a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-8a2 2 0 0 1-2-2v-2" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+          </div>
+        </div>
+      </aside>
+    </>
   );
 }
 
