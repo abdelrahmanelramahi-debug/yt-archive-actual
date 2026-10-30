@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyIdToken, listUsers, readUserMeta, getHiddenChannels, DAILY_CAP } from "../../../../lib/firebase-admin";
+import { verifyIdToken, listUsers, readUserMeta, getHiddenChannels, getDefaultCap } from "../../../../lib/firebase-admin";
 import { brainChannelList } from "../../../../lib/channels";
 
 // Admin only: every account with its effective daily cap, today's usage, and any per-account channel
@@ -10,7 +10,7 @@ export async function GET(req: NextRequest) {
   if (!auth.admin) return NextResponse.json({ error: "Admins only." }, { status: 403 });
 
   try {
-    const [users, hidden] = await Promise.all([listUsers(), getHiddenChannels()]);
+    const [users, hidden, defaultCap] = await Promise.all([listUsers(), getHiddenChannels(), getDefaultCap()]);
     const meta = await readUserMeta(users.map((u) => u.uid));
 
     let hiddenChannels: { slug: string; name: string }[] = [];
@@ -33,7 +33,7 @@ export async function GET(req: NextRequest) {
       })
       .sort((x, y) => (x.email || "").localeCompare(y.email || ""));
 
-    return NextResponse.json({ users: rows, defaultCap: DAILY_CAP, hiddenChannels });
+    return NextResponse.json({ users: rows, defaultCap, hiddenChannels });
   } catch {
     return NextResponse.json({ error: "Could not load accounts." }, { status: 503 });
   }

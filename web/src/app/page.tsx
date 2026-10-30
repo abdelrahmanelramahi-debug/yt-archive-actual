@@ -253,7 +253,7 @@ function ChannelPicker({
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const { lang } = useLang();
+  const { lang, t } = useLang();
   const all = selected.size === channels.length;
   const label = all ? "All channels" : selected.size === 0 ? "No channels" : `${selected.size} of ${channels.length}`;
 
@@ -313,12 +313,20 @@ function ChannelPicker({
           }`}
         >
           <div className="flex items-center justify-between px-2 py-1 text-xs">
-            <button type="button" className="font-medium text-accent hover:underline" onClick={() => onChange(new Set(channels.map((c) => c.slug)))}>
-              Select all
-            </button>
-            <button type="button" className="text-muted hover:text-ink" onClick={() => onChange(new Set())}>
-              Clear
-            </button>
+            {all ? (
+              <button type="button" className="font-medium text-accent hover:underline" onClick={() => onChange(new Set())}>
+                {t("channels.deselectAll")}
+              </button>
+            ) : (
+              <>
+                <button type="button" className="font-medium text-accent hover:underline" onClick={() => onChange(new Set(channels.map((c) => c.slug)))}>
+                  {t("channels.selectAll")}
+                </button>
+                <button type="button" className="text-muted hover:text-ink" onClick={() => onChange(new Set())}>
+                  {t("channels.clear")}
+                </button>
+              </>
+            )}
           </div>
           {channels.map((c) => (
             <label
@@ -684,7 +692,9 @@ export default function Home() {
         })),
         coverage,
         cost_usd: cost ?? null,
-        style: answerStyle,
+        // the style the answer was actually asked in (`style`); answerStyle is the displayed copy and
+        // lags a render behind when saving right after asking, so it would save the wrong style.
+        style,
         createdAt: serverTimestamp(),
       });
     } catch {
@@ -1339,7 +1349,7 @@ function Sidebar({
                   onClick={() => onDeleteChat(c.id)}
                   aria-label={t("aria.deleteQuestion")}
                   title={t("aria.deleteQuestion")}
-                  className="absolute end-1 top-1/2 -translate-y-1/2 rounded p-1 text-faint opacity-0 transition hover:text-danger group-hover/chat:opacity-100"
+                  className="absolute end-1 top-1/2 -translate-y-1/2 rounded p-1 text-faint opacity-100 transition hover:text-danger sm:opacity-0 sm:group-hover/chat:opacity-100"
                 >
                   <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-hidden>
                     <path d="M4 7h16M9 7V5a1 1 0 0 1 1-1h4a1 1 0 0 1 1 1v2m2 0v12a1 1 0 0 1-1 1H7a1 1 0 0 1-1-1V7" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
@@ -1438,6 +1448,8 @@ function AccountsTab() {
   const { t } = useLang();
   const [rows, setRows] = useState<AdminUser[]>([]);
   const [defaultCap, setDefaultCap] = useState(DAILY_CAP);
+  const [defaultVal, setDefaultVal] = useState(""); // the default-cap input (site-wide, admin-editable)
+  const [savingDefault, setSavingDefault] = useState(false);
   const [hiddenChannels, setHiddenChannels] = useState<NamedChannel[]>([]);
   const [status, setStatus] = useState<"loading" | "ready" | "error">("loading");
   const [err, setErr] = useState("");
@@ -1459,6 +1471,7 @@ function AccountsTab() {
         }
         setRows(d.users || []);
         setDefaultCap(d.defaultCap ?? DAILY_CAP);
+        setDefaultVal(String(d.defaultCap ?? DAILY_CAP));
         setHiddenChannels(Array.isArray(d.hiddenChannels) ? d.hiddenChannels : []);
         setStatus("ready");
       } catch {
@@ -1472,6 +1485,24 @@ function AccountsTab() {
       alive = false;
     };
   }, []);
+
+  // set the site-wide default daily limit for everyone (admin only; the brain re-checks on each ask)
+  async function saveDefaultCap() {
+    const n = Number(defaultVal);
+    if (!Number.isFinite(n) || n < 1) return;
+    setSavingDefault(true);
+    try {
+      const token = await idToken();
+      const r = await fetch("/api/admin/cap", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify({ defaultCap: n }),
+      });
+      if (r.ok) setDefaultCap(n);
+    } finally {
+      setSavingDefault(false);
+    }
+  }
 
   async function saveCap(uid: string, cap: number | null) {
     setSavingUid(uid);
@@ -1513,6 +1544,25 @@ function AccountsTab() {
         {t("admin.accounts.help", { cap: defaultCap })}
         {hiddenChannels.length > 0 ? t("admin.accounts.helpChannels") : ""}
       </p>
+      <div className="flex items-center gap-2 px-5 pb-1 pt-2">
+        <span className="text-[12px] font-medium text-ink">{t("admin.defaultCapLabel")}</span>
+        <input
+          inputMode="numeric"
+          value={defaultVal}
+          onChange={(e) => setDefaultVal(e.target.value.replace(/[^0-9]/g, ""))}
+          placeholder={String(defaultCap)}
+          aria-label={t("admin.defaultCapLabel")}
+          className="w-16 rounded-md border border-line bg-paper px-2 py-1 text-end text-[13px] text-ink outline-none focus:border-line2"
+        />
+        <button
+          type="button"
+          onClick={saveDefaultCap}
+          disabled={savingDefault || defaultVal.trim() === "" || Number(defaultVal) === defaultCap}
+          className="shrink-0 rounded-md border border-line px-2.5 py-1 text-[12px] text-muted transition enabled:hover:border-line2 enabled:hover:text-ink disabled:opacity-40"
+        >
+          {savingDefault ? "…" : t("admin.save")}
+        </button>
+      </div>
       <div className="flex-1 overflow-y-auto px-3 py-3">
         {status === "loading" && <p className="px-2 py-6 text-center text-sm text-faint">{t("admin.loading")}</p>}
         {status === "error" && <p className="px-2 py-6 text-center text-sm text-danger">{err}</p>}

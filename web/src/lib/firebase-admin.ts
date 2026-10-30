@@ -66,7 +66,7 @@ export async function consumeDaily(uid: string, guest = false): Promise<{ remain
 
   const get = await fetch(`${DOC}/${uid}`, { headers: auth });
   let count = 0;
-  let cap = guest ? GUEST_CAP : DAILY_CAP;
+  let cap = guest ? GUEST_CAP : await getDefaultCap();
   if (get.ok) {
     const f = ((await get.json()) as { fields?: Record<string, { stringValue?: string; integerValue?: string }> }).fields || {};
     if (f.day?.stringValue === today) count = Number(f.count?.integerValue || 0);
@@ -278,4 +278,39 @@ export async function setChannelNames(names: ChannelNameOverrides): Promise<void
     body: JSON.stringify({ fields: { names: { mapValue: { fields } } } }),
   });
   if (!r.ok) throw new Error(`channel names write failed: ${r.status}`);
+}
+
+// Site-wide default daily answer cap for real (non-guest) accounts, admin-editable, stored on
+// config/limits. Falls back to the DAILY_CAP env default when unset. Cached briefly so it isn't read
+// from Firestore on every question.
+const LIMITS_DOC = `${FS_DB}/config/limits`;
+let capCache: { val: number; exp: number } | null = null;
+
+export async function getDefaultCap(): Promise<number> {
+  if (capCache && capCache.exp > Date.now()) return capCache.val;
+  let val = DAILY_CAP;
+  try {
+    const token = await accessToken();
+    const r = await fetch(LIMITS_DOC, { headers: { Authorization: `Bearer ${token}` } });
+    if (r.ok) {
+      const j = (await r.json()) as { fields?: { dailyCap?: { integerValue?: string } } };
+      const n = Number(j.fields?.dailyCap?.integerValue);
+      if (Number.isFinite(n) && n > 0) val = n;
+    }
+  } catch {
+    val = DAILY_CAP; // fail safe to the env default on any read error
+  }
+  capCache = { val, exp: Date.now() + 60_000 };
+  return val;
+}
+
+export async function setDefaultCap(cap: number): Promise<void> {
+  const token = await accessToken();
+  const r = await fetch(`${LIMITS_DOC}?updateMask.fieldPaths=dailyCap`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ fields: { dailyCap: { integerValue: String(Math.floor(cap)) } } }),
+  });
+  if (!r.ok) throw new Error(`limits write failed: ${r.status}`);
+  capCache = { val: Math.floor(cap), exp: Date.now() + 60_000 };
 }

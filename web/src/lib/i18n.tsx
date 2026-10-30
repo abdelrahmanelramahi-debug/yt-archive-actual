@@ -154,6 +154,12 @@ const DICT: Record<Lang, Record<string, string>> = {
     "custom.tokens.unit": "tokens",
     "custom.tokens.help": "The most the answer may write (a token ≈ ¾ word). A ceiling, not a target — raising it won't pad a short answer, only free a long one. ~16k ≈ 12k words; max 32k.",
     "custom.note": "This is an upper estimate — the answer usually costs less, since it stops once it has said everything relevant. The real cost shows with each answer.",
+    "channels.selectAll": "Select all",
+    "channels.deselectAll": "Deselect all",
+    "channels.clear": "Clear",
+    "admin.defaultCapLabel": "Default daily limit (everyone):",
+    "whatsnew.polish.t": "More small fixes",
+    "whatsnew.polish.b": "Saved answers keep their style, deleting a chat is easier on mobile, and you can Select or Deselect all channels in one tap.",
   },
   ar: {
     "hero.title": "اسأل عبر الأرشيف",
@@ -302,6 +308,12 @@ const DICT: Record<Lang, Record<string, string>> = {
     "custom.tokens.unit": "رمز",
     "custom.tokens.help": "أقصى ما قد تكتبه الإجابة (الرمز ≈ ثلاثة أرباع كلمة). سقفٌ لا هدف — رفعه لا يُطيل إجابةً قصيرة، بل يُتيح الطويلة فقط. ~16 ألفًا ≈ 12 ألف كلمة؛ الحدّ 32 ألفًا.",
     "custom.note": "هذا تقدير أعلى — الإجابة أقل كلفةً عادةً، إذ تتوقف متى قالت كل ما يتّصل بالسؤال. التكلفة الحقيقية تظهر مع كل إجابة.",
+    "channels.selectAll": "تحديد الكل",
+    "channels.deselectAll": "إلغاء تحديد الكل",
+    "channels.clear": "مسح",
+    "admin.defaultCapLabel": "الحد اليومي الافتراضي (للجميع):",
+    "whatsnew.polish.t": "إصلاحات صغيرة أخرى",
+    "whatsnew.polish.b": "تحتفظ الإجابات المحفوظة بنمطها، وحذف المحادثة أسهل على الجوال، ويمكنك تحديد كل القنوات أو إلغاء تحديدها بنقرة واحدة.",
   },
 };
 
