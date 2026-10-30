@@ -453,6 +453,25 @@ export default function Home() {
     if (typeof window !== "undefined" && window.innerWidth < 640) setSidebarOpen(false);
   }, []);
 
+  // iOS tints the top/bottom safe-area strips (behind the status bar and home indicator) from
+  // <meta theme-color>. On phones the sidebar's translucent backdrop paints over those strips and
+  // iOS can leave the darkened blend stuck there after it closes. Re-point the meta on every
+  // toggle — dimmed while open (so the bars match the backdrop), paper when closed — which forces
+  // iOS to repaint the strips, so nothing stale is left behind.
+  useEffect(() => {
+    const meta = document.querySelector<HTMLMetaElement>('meta[name="theme-color"]');
+    if (!meta) return;
+    const dark = document.documentElement.getAttribute("data-theme") === "dark";
+    const paper = dark ? "#16150f" : "#fafaf8";
+    const dim = (hex: string) => {
+      const n = parseInt(hex.slice(1), 16);
+      const b = (c: number) => Math.round(c * 0.6);
+      return "#" + ((1 << 24) + (b((n >> 16) & 255) << 16) + (b((n >> 8) & 255) << 8) + b(n & 255)).toString(16).slice(1);
+    };
+    const mobile = window.matchMedia("(max-width: 639px)").matches;
+    meta.setAttribute("content", mobile && sidebarOpen ? dim(paper) : paper);
+  }, [sidebarOpen]);
+
   // live daily usage for the signed-in user (the server writes it; the rules let a user read their own)
   useEffect(() => {
     if (!user) {
@@ -985,7 +1004,14 @@ function Sidebar({
 }) {
   return (
     <>
-      {open && <div onClick={onClose} className="fixed inset-0 z-30 bg-black/40 sm:hidden" aria-hidden />}
+      {/* kept mounted and faded (not abruptly unmounted) so iOS repaints the safe-area strips cleanly */}
+      <div
+        onClick={onClose}
+        aria-hidden
+        className={`fixed inset-0 z-30 bg-black/40 transition-opacity duration-200 sm:hidden ${
+          open ? "opacity-100" : "pointer-events-none opacity-0"
+        }`}
+      />
       <aside
         className={`fixed inset-y-0 left-0 z-40 flex w-[264px] flex-col border-r border-line bg-raised transition-transform duration-200 ${
           open ? "translate-x-0" : "-translate-x-full"

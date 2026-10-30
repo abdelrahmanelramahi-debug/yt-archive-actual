@@ -24,17 +24,18 @@ export const metadata: Metadata = {
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  themeColor: [
-    { media: "(prefers-color-scheme: light)", color: "#f5f3ed" },
-    { media: "(prefers-color-scheme: dark)", color: "#16150f" },
-  ],
+  // One controllable (non-media) <meta theme-color> so a client effect can re-point it when the
+  // mobile sidebar opens/closes — iOS tints the top/bottom safe-area strips from it, and a
+  // translucent backdrop can leave a stale blend there otherwise. themeInit fixes it for dark
+  // before paint; page.tsx keeps it in sync after.
+  themeColor: "#fafaf8",
 };
 
 export default function RootLayout({
   children,
 }: Readonly<{ children: React.ReactNode }>) {
   // Set the theme before paint so there's no flash of the wrong colours. Default follows the OS.
-  const themeInit = `(function(){try{var c=localStorage.getItem('theme')||'system';var t=c==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):c;var e=document.documentElement;e.setAttribute('data-theme',t);e.setAttribute('data-theme-choice',c);}catch(e){document.documentElement.setAttribute('data-theme','light');}})();`;
+  const themeInit = `(function(){try{var c=localStorage.getItem('theme')||'system';var t=c==='system'?(matchMedia('(prefers-color-scheme: dark)').matches?'dark':'light'):c;var e=document.documentElement;e.setAttribute('data-theme',t);e.setAttribute('data-theme-choice',c);var m=document.querySelector('meta[name=theme-color]');if(m)m.setAttribute('content',t==='dark'?'#16150f':'#fafaf8');}catch(e){document.documentElement.setAttribute('data-theme','light');}})();`;
   return (
     <html lang="en" className={`${inter.variable} ${fraunces.variable}`} data-theme="light" suppressHydrationWarning>
       <body>
