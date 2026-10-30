@@ -5,6 +5,7 @@ import {
   onAuthStateChanged,
   GoogleAuthProvider,
   signInWithPopup,
+  signInAnonymously,
   createUserWithEmailAndPassword,
   signInWithEmailAndPassword,
   signOut as fbSignOut,
@@ -25,6 +26,7 @@ export const useAuth = () => useContext(AuthCtx);
 
 // sign-in helpers (used by the sign-in screen)
 export const signInWithGoogle = () => signInWithPopup(auth, new GoogleAuthProvider());
+export const continueAsGuest = () => signInAnonymously(auth); // guest mode (a real anonymous session)
 export const signUpEmail = (email: string, pw: string) => createUserWithEmailAndPassword(auth, email, pw);
 export const signInEmail = (email: string, pw: string) => signInWithEmailAndPassword(auth, email, pw);
 export const signOutUser = () => fbSignOut(auth);

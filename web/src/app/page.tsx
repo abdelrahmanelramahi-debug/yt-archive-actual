@@ -9,6 +9,7 @@ import SignIn from "./SignIn";
 import UpdatePopup from "./UpdatePopup";
 
 const DAILY_CAP = 20; // free answers per user per day (keep in sync with the server's cap)
+const GUEST_CAP = 2; // free questions for a guest (anonymous) before they're asked to sign up
 
 // one saved question+answer in the user's history (sources stored light — no transcript windows)
 type ChatDoc = { id: string; q: string; answer: string; sources: Source[]; coverage: Coverage; cost_usd?: number | null };
@@ -445,6 +446,7 @@ export default function Home() {
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
+  const [guestOpen, setGuestOpen] = useState(false);
 
   // start collapsed on phones (where it's a full-screen overlay)
   useEffect(() => {
@@ -601,6 +603,11 @@ export default function Home() {
   async function ask(question: string) {
     const text = question.trim();
     if (!text || status === "loading" || status === "streaming") return;
+    // a guest who's used their free questions is nudged to sign up rather than asking again
+    if (user?.isAnonymous && usedToday >= GUEST_CAP) {
+      setGuestOpen(true);
+      return;
+    }
     setAsked(text);
     setStatus("loading");
     setStage(0);
@@ -633,8 +640,13 @@ export default function Home() {
         headers,
         body: JSON.stringify(payload),
       });
-      const data: Answer = await r.json();
+      const data: Answer & { guest?: boolean } = await r.json();
       if (!r.ok || data.error) {
+        if (data.guest) {
+          setGuestOpen(true);
+          setStatus("idle");
+          return;
+        }
         setError(data.error || t("err.generic"));
         setStatus("error");
         return;
@@ -662,6 +674,12 @@ export default function Home() {
       // (sign-in, daily cap, brain error) is shown directly, so it isn't retried and double-counted.
       if (r.status && r.status !== 404 && r.status !== 405) {
         const data = await r.json().catch(() => ({}));
+        if ((data as { guest?: boolean }).guest) {
+          setGuestOpen(true);
+          setStatus("idle");
+          setLive(false);
+          return;
+        }
         setError((data as { error?: string }).error || t("err.generic"));
         setStatus("error");
         setLive(false);
@@ -815,12 +833,14 @@ export default function Home() {
         onNew={newChat}
         email={user.email ?? ""}
         usedToday={usedToday}
-        dailyCap={dailyCap}
+        dailyCap={user.isAnonymous ? GUEST_CAP : dailyCap}
+        isGuest={!!user.isAnonymous}
         isAdmin={isAdmin}
         onOpenAdmin={() => setAdminOpen(true)}
       />
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
-      <UpdatePopup />
+      {guestOpen && <GuestPrompt onClose={() => setGuestOpen(false)} />}
+      {!user.isAnonymous && <UpdatePopup />}
       <div className={`transition-[margin] duration-200 ${sidebarOpen ? "ltr:sm:ml-[264px] rtl:sm:mr-[264px]" : ""}`}>
         <main className={`mx-auto w-full max-w-3xl px-5 ${landing ? "pb-10" : "pb-28"}`}>
           {/* top bar: open the sidebar (always on phones; on desktop only when it's collapsed) */}
@@ -1042,6 +1062,7 @@ function Sidebar({
   email,
   usedToday,
   dailyCap,
+  isGuest,
   isAdmin,
   onOpenAdmin,
 }: {
@@ -1056,6 +1077,7 @@ function Sidebar({
   email: string;
   usedToday: number;
   dailyCap: number;
+  isGuest: boolean;
   isAdmin: boolean;
   onOpenAdmin: () => void;
 }) {
@@ -1142,9 +1164,13 @@ function Sidebar({
           )}
           <div className="flex items-center justify-between gap-2 border-t border-line pt-2.5">
             <div className="min-w-0">
-              <p className="truncate text-[12px] text-ink" dir="ltr" title={email}>{email || "Signed in"}</p>
+              <p className="truncate text-[12px] text-ink" dir={isGuest ? "auto" : "ltr"} title={email}>
+                {isGuest ? t("guest.label") : email || "Signed in"}
+              </p>
               <p className="text-[11px] text-faint">
-                {t("sidebar.answersToday", { used: usedToday, cap: dailyCap })}
+                {isGuest
+                  ? t("guest.usage", { used: usedToday, cap: dailyCap })
+                  : t("sidebar.answersToday", { used: usedToday, cap: dailyCap })}
               </p>
             </div>
             <button type="button" onClick={() => signOutUser()} aria-label={t("aria.signout")} title={t("aria.signout")} className="shrink-0 rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink rtl:-scale-x-100">
@@ -1521,6 +1547,45 @@ function AdminRow({
           )}
         </>
       )}
+    </div>
+  );
+}
+
+/* Shown when a guest has used their free questions — nudges them to sign up or sign in.
+   Choosing an option ends the guest session, which drops back to the sign-in screen. */
+function GuestPrompt({ onClose }: { onClose: () => void }) {
+  const { t } = useLang();
+  function go(mode: "in" | "up") {
+    try {
+      localStorage.setItem("authMode", mode);
+    } catch {
+      /* ignore */
+    }
+    signOutUser();
+  }
+  return (
+    <div className="fixed inset-0 z-[60] flex items-center justify-center p-4" role="dialog" aria-modal>
+      <div className="absolute inset-0 bg-black/50" onClick={onClose} aria-hidden />
+      <div className="fade-up relative z-10 w-full max-w-sm overflow-hidden rounded-2xl border border-line bg-raised shadow-xl">
+        <div className="px-6 pb-2 pt-6">
+          <span className="mb-4 inline-flex h-10 w-10 items-center justify-center rounded-full bg-accent/10 text-accent">
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" aria-hidden>
+              <rect x="4.5" y="10.5" width="15" height="10" rx="2.5" stroke="currentColor" strokeWidth="1.6" />
+              <path d="M8 10.5V7.5a4 4 0 0 1 8 0v3" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+            </svg>
+          </span>
+          <h2 dir="auto" className="font-serif text-xl font-medium text-ink">{t("guest.prompt.title")}</h2>
+          <p dir="auto" className="mt-2 text-sm leading-relaxed text-muted">{t("guest.prompt.body")}</p>
+        </div>
+        <div className="space-y-2.5 px-6 pb-6 pt-3">
+          <button type="button" onClick={() => go("up")} className="w-full rounded-lg bg-accent px-4 py-2.5 text-sm font-medium text-paper transition hover:bg-accent2">
+            {t("guest.prompt.create")}
+          </button>
+          <button type="button" onClick={() => go("in")} className="w-full rounded-lg border border-line bg-raised px-4 py-2.5 text-sm font-medium text-muted transition hover:border-line2 hover:text-ink">
+            {t("guest.prompt.signin")}
+          </button>
+        </div>
+      </div>
     </div>
   );
 }

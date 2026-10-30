@@ -1,7 +1,7 @@
 "use client";
 
 import { useState } from "react";
-import { signInWithGoogle, signUpEmail, signInEmail } from "../lib/auth";
+import { signInWithGoogle, signUpEmail, signInEmail, continueAsGuest } from "../lib/auth";
 import { useLang, LangToggle } from "../lib/i18n";
 
 // map Firebase's error codes to a dictionary key ("" = silent, e.g. the user closed the popup)
@@ -13,8 +13,21 @@ function errKey(e: unknown): string {
   if (code.includes("weak-password")) return "signin.err.weak";
   if (code.includes("invalid-email")) return "signin.err.invalidEmail";
   if (code.includes("popup-closed") || code.includes("cancelled-popup")) return "";
+  if (code.includes("operation-not-allowed") || code.includes("admin-restricted-operation")) return "signin.err.guestOff";
   if (code.includes("too-many-requests")) return "signin.err.tooMany";
   return "signin.err.generic";
+}
+
+// the guest limit prompt sets this so we open straight into the right mode
+function initialMode(): "in" | "up" {
+  try {
+    const m = localStorage.getItem("authMode");
+    localStorage.removeItem("authMode");
+    if (m === "up") return "up";
+  } catch {
+    /* ignore */
+  }
+  return "in";
 }
 
 export default function SignIn() {
@@ -23,7 +36,7 @@ export default function SignIn() {
     const k = errKey(e);
     return k ? t(k) : "";
   };
-  const [mode, setMode] = useState<"in" | "up">("in");
+  const [mode, setMode] = useState<"in" | "up">(initialMode);
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
@@ -34,6 +47,18 @@ export default function SignIn() {
     setBusy(true);
     try {
       await signInWithGoogle();
+    } catch (e) {
+      setErr(friendly(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function asGuest() {
+    setErr("");
+    setBusy(true);
+    try {
+      await continueAsGuest();
     } catch (e) {
       setErr(friendly(e));
     } finally {
@@ -103,6 +128,16 @@ export default function SignIn() {
             {busy ? "…" : mode === "up" ? t("signin.create") : t("signin.signIn")}
           </button>
         </form>
+
+        <button
+          type="button"
+          onClick={asGuest}
+          disabled={busy}
+          className="mt-3 w-full rounded-lg border border-line bg-raised px-4 py-2.5 text-sm font-medium text-muted transition hover:border-line2 hover:text-ink disabled:opacity-60"
+        >
+          {t("signin.guest")}
+        </button>
+        <p className="mt-1.5 text-center text-[11px] text-faint">{t("signin.guestHint")}</p>
 
         <p className="mt-4 text-[13px] text-muted">
           {mode === "up" ? t("signin.haveAccount") : t("signin.newHere")}

@@ -28,9 +28,15 @@ export async function POST(req: NextRequest) {
   // reserve one of today's free answers before spending on Claude (cap is per-account)
   let remaining: number;
   try {
-    const res = await consumeDaily(uid);
+    const res = await consumeDaily(uid, auth.anon);
     remaining = res.remaining;
     if (res.remaining < 0) {
+      if (auth.anon) {
+        return NextResponse.json(
+          { error: `You've used your ${res.cap} free questions. Sign in or create an account to keep going.`, guest: true },
+          { status: 429 }
+        );
+      }
       return NextResponse.json(
         { error: `You've used your ${res.cap} free answers for today. They reset at midnight (UTC).` },
         { status: 429 }

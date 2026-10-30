@@ -6,6 +6,7 @@ import { jwtVerify, createRemoteJWKSet, importPKCS8, SignJWT } from "jose";
 
 const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "latafti";
 export const DAILY_CAP = Number(process.env.DAILY_CAP || 20);
+export const GUEST_CAP = Number(process.env.GUEST_CAP || 2); // free questions before guests must sign up
 
 // Bootstrap admins by email (comma-separated), set in the environment. Anyone signed in with one
 // of these emails is treated as an admin — no custom-claim plumbing needed to get started.
@@ -73,19 +74,21 @@ const DOC = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/database
 // the global DAILY_CAP default for just that account. Returns the remaining count (or -1 if over)
 // together with the effective cap. Read-then-write (no transaction): the tiny concurrency window
 // can let a user get one extra, which is fine for a soft cap. The day resets at UTC midnight.
-export async function consumeDaily(uid: string): Promise<{ remaining: number; cap: number }> {
+export async function consumeDaily(uid: string, guest = false): Promise<{ remaining: number; cap: number }> {
   const token = await accessToken();
   const auth = { Authorization: `Bearer ${token}` };
   const today = new Date().toISOString().slice(0, 10);
 
   const get = await fetch(`${DOC}/${uid}`, { headers: auth });
   let count = 0;
-  let cap = DAILY_CAP;
+  let cap = guest ? GUEST_CAP : DAILY_CAP;
   if (get.ok) {
     const f = ((await get.json()) as { fields?: Record<string, { stringValue?: string; integerValue?: string }> }).fields || {};
     if (f.day?.stringValue === today) count = Number(f.count?.integerValue || 0);
-    const c = Number(f.cap?.integerValue);
-    if (Number.isFinite(c) && c > 0) cap = c; // admin-set per-account override
+    if (!guest) {
+      const c = Number(f.cap?.integerValue);
+      if (Number.isFinite(c) && c > 0) cap = c; // admin-set per-account override (real accounts only)
+    }
   } else if (get.status !== 404) {
     throw new Error(`firestore read failed: ${get.status}`);
   }
@@ -117,7 +120,7 @@ export async function consumeDaily(uid: string): Promise<{ remaining: number; ca
 // future `admin` custom claim). Returns null if the token is invalid.
 export async function verifyIdToken(
   authHeader: string | null
-): Promise<{ uid: string; email: string; admin: boolean } | null> {
+): Promise<{ uid: string; email: string; admin: boolean; anon: boolean } | null> {
   const m = (authHeader || "").match(/^Bearer\s+(.+)$/i);
   if (!m) return null;
   try {
@@ -127,8 +130,9 @@ export async function verifyIdToken(
     });
     const uid = (payload.sub as string) || "";
     const email = ((payload.email as string) || "").toLowerCase();
-    const admin = payload.admin === true || (email !== "" && ADMIN_EMAILS.includes(email));
-    return uid ? { uid, email, admin } : null;
+    const anon = (payload.firebase as { sign_in_provider?: string } | undefined)?.sign_in_provider === "anonymous";
+    const admin = !anon && (payload.admin === true || (email !== "" && ADMIN_EMAILS.includes(email)));
+    return uid ? { uid, email, admin, anon } : null;
   } catch {
     return null;
   }
