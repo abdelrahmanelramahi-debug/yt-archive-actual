@@ -3239,6 +3239,449 @@ def kw_search(ch, terms, limit=40):
              "channel": r[6], "type": r[7], "text": r[8]} for r in rows]
 
 
+# ---------- Quran & hadith quotes: which moments recite a verse or a hadith ----------
+# The source texts live in output/library (downloaded once, see output/library/SOURCES.md): Tanzil's
+# Quran and the fawazahmed0 hadith collections. Only Arabic (keyword) channels are matched - English
+# captions don't carry the Arabic wording. A match needs a long run of the source's rarer wording in
+# order (stock phrases like the salawat or "haddathana" chains are too common to count), a shorter run
+# is accepted only right after a lead-in like "qala Allah ta'ala" / "qala an-Nabi", and the site words
+# it as "matches", never "the scholar quotes".
+LIBRARY = OUTPUT / "library"
+QUOTE_VERSION = 3        # bump when the matcher or its index format changes: rebuilds both, re-matches all
+QUOTE_MIN_WORDS = 8      # matched words needed with no lead-in
+QUOTE_MIN_WORDS_CUE = 6  # ... right after a lead-in
+QUOTE_MAX_GRAM = 60      # 3-word runs found more often than this in the sources are stock phrases: ignored
+QUOTE_RARE = 15          # a run found at most this often counts as distinctive wording; a match needs 2
+HADITH_BOOKS = [  # matching priority when the same hadith is in several books
+    ("bukhari", "Sahih al-Bukhari", "صحيح البخاري"), ("muslim", "Sahih Muslim", "صحيح مسلم"),
+    ("abudawud", "Sunan Abi Dawud", "سنن أبي داود"), ("tirmidhi", "Jami' at-Tirmidhi", "جامع الترمذي"),
+    ("nasai", "Sunan an-Nasa'i", "سنن النسائي"), ("ibnmajah", "Sunan Ibn Majah", "سنن ابن ماجه"),
+    ("malik", "Muwatta Malik", "موطأ مالك"), ("nawawi", "An-Nawawi's Forty", "الأربعون النووية"),
+    ("qudsi", "Forty Hadith Qudsi", "الأربعون القدسية"), ("dehlawi", "Dehlawi's Forty", "أربعون الدهلوي")]
+_QUOTE_CUES = {norm_text(w) for w in "تعالى سبحانه وجل وعلا قوله الآية النبي رسول الرسول وسلم الحديث حديث "
+                                      "عنه عنها عنهما قال يقول".split()}
+# Openers and closers said at nearly every lesson. They are hadith wording, but labelling every
+# lecture's first minute "Sunan Ibn Majah 1891" is noise, so a match made mostly of these is dropped.
+_QUOTE_FORMULAS = [
+    "إن الحمد لله نحمده ونستعينه ونستغفره ونعوذ بالله من شرور أنفسنا ومن سيئات أعمالنا من يهده الله فلا مضل "
+    "له ومن يضلل فلا هادي له",
+    "وأشهد أن لا إله إلا الله وحده لا شريك له وأشهد أن محمدا عبده ورسوله",
+    "وأشهد أن محمدا عبد الله ورسوله",
+    "اللهم صل على محمد وعلى آل محمد كما صليت على إبراهيم وعلى آل إبراهيم إنك حميد مجيد اللهم بارك على محمد "
+    "وعلى آل محمد كما باركت على إبراهيم وعلى آل إبراهيم إنك حميد مجيد",
+    "أما بعد فإن خير الحديث كتاب الله وخير الهدي هدي محمد صلى الله عليه وسلم وشر الأمور محدثاتها",
+    "فإن أصدق الحديث كتاب الله وأحسن الكلام كلام الله وأحسن الهدي هدي محمد صلى الله عليه وسلم",
+    "سبحانك اللهم وبحمدك أشهد أن لا إله إلا أنت أستغفرك وأتوب إليك",
+    "السلام عليكم ورحمة الله وبركاته",
+    "بسم الله الرحمن الرحيم الحمد لله رب العالمين والصلاة والسلام على نبينا محمد",
+    "الحمد لله رب العالمين وصلى الله وسلم على نبينا محمد وعلى آله وصحبه أجمعين",
+]
+_QIX = {}  # the loaded index, per process
+
+
+def _library_files():
+    files = [LIBRARY / "quran" / "quran-simple-clean.txt", LIBRARY / "quran" / "quran-uthmani.txt",
+             LIBRARY / "quran" / "quran-data.xml"]
+    return files + [LIBRARY / "hadith" / f"ara-{b}.json" for b, _, _ in HADITH_BOOKS] \
+        + [LIBRARY / "hadith" / f"eng-{b}.json" for b, _, _ in HADITH_BOOKS]
+
+
+def library_src():
+    """Fingerprint of the source texts (and the matcher version), or None if the library isn't here."""
+    parts = [str(QUOTE_VERSION)]
+    for f in _library_files():
+        try:
+            st = f.stat()
+        except OSError:
+            return None
+        parts.append(f"{st.st_mtime_ns}:{st.st_size}")
+    return "|".join(parts)
+
+
+def _quran_lines(name):
+    """[(sura, aya, text)] from a Tanzil `sura|aya|text` file (the licence notice at the end is skipped).
+    Tanzil writes the basmala into the first verse of every sura; it is only a verse of al-Fatiha, so
+    it is taken off the others (al-Tawbah has none)."""
+    out = []
+    for line in (LIBRARY / "quran" / name).read_text(encoding="utf-8").splitlines():
+        m = re.match(r"^(\d+)\|(\d+)\|(.*)$", line)
+        if m:
+            s, a, text = int(m.group(1)), int(m.group(2)), m.group(3)
+            if a == 1 and s not in (1, 9):
+                words = text.split()
+                if len(words) > 4 and norm_text(" ".join(words[:4])) == norm_text("بسم الله الرحمن الرحيم"):
+                    text = " ".join(words[4:])
+            out.append((s, a, text))
+    return out
+
+
+def _quote_tokens(text):
+    """Normalised words of a source text, plus for each the index of the original whitespace token it
+    came from, so a match can be shown back in the original (with harakat)."""
+    words, tok = [], []
+    for j, t in enumerate((text or "").split()):
+        for w in norm_text(t).split():
+            words.append(w)
+            tok.append(j)
+    return words, tok
+
+
+def build_quote_index():
+    """Index every 3-word run of the Quran and the hadith books, saved in output/library/index/.
+    Stream 0 is the whole Quran (a recitation can run across verses); every hadith is its own stream.
+    Words are stored as vocabulary ids, so a run is one exact int64 and matching needs no strings."""
+    import numpy as np
+    vocab, streams, ids, qverse = {}, [], [], []
+
+    def add(words):
+        ids.append(np.array([vocab.setdefault(w, len(vocab)) for w in words], dtype=np.int64))
+
+    q = _quran_lines("quran-simple-clean.txt")
+    qwords = []
+    for vi, (_, _, text) in enumerate(q):
+        ws = norm_text(text).split()
+        qwords += ws
+        qverse += [vi] * len(ws)
+    add(qwords)
+    streams.append(["q", 0, ""])
+    for book, _, _ in HADITH_BOOKS:
+        d = read_obj(LIBRARY / "hadith" / f"ara-{book}.json")
+        for i, h in enumerate(d.get("hadiths") or []):
+            words, _ = _quote_tokens(h.get("text"))
+            if len(words) >= QUOTE_MIN_WORDS_CUE:
+                add(words)
+                streams.append(["h", i, book])
+    soff = np.zeros(len(ids) + 1, dtype=np.int64)
+    soff[1:] = np.cumsum([len(a) for a in ids])
+    allw = np.concatenate(ids)
+    V = np.int64(len(vocab) + 1)
+    grams, gpos = [], []
+    for s, a in enumerate(ids):
+        if len(a) >= 3:
+            grams.append((a[:-2] * V + a[1:-1]) * V + a[2:])
+            gpos.append(np.arange(len(a) - 2, dtype=np.int64) + soff[s])
+    grams, gpos = np.concatenate(grams), np.concatenate(gpos)
+    order = np.argsort(grams, kind="stable")
+    grams, gpos = grams[order], gpos[order]
+    ug, start, cnt = np.unique(grams, return_index=True, return_counts=True)
+    formula = set()
+    for text in _QUOTE_FORMULAS:
+        a = [vocab.get(w, -1) for w in norm_text(text).split()]
+        formula |= {(x * int(V) + y) * int(V) + z for x, y, z in zip(a, a[1:], a[2:]) if min(x, y, z) >= 0}
+    out = LIBRARY / "index"
+    out.mkdir(parents=True, exist_ok=True)
+    with open(out / "quotes.tmp", "wb") as f:
+        np.savez(f, allw=allw, soff=soff, ug=ug, start=start.astype(np.int64), cnt=cnt.astype(np.int64),
+                 post=gpos, qverse=np.array(qverse, dtype=np.int32),
+                 qsa=np.array([(s, a) for s, a, _ in q], dtype=np.int32),
+                 formula=np.array(sorted(formula), dtype=np.int64))
+    replace_file(out / "quotes.tmp", out / "quotes.npz")
+    write_json(out / "quotes.json", {"src": library_src(), "vocab": list(vocab), "streams": streams})
+    return len(streams)
+
+
+def _quote_index():
+    """The saved index, loaded once per process (worker processes load their own copy)."""
+    if not _QIX:
+        import numpy as np
+        meta = read_obj(LIBRARY / "index" / "quotes.json")
+        z = np.load(LIBRARY / "index" / "quotes.npz")
+        _QIX.update({k: z[k] for k in z.files})
+        _QIX["vocab"] = {w: i for i, w in enumerate(meta.get("vocab") or [])}
+        _QIX["streams"] = meta.get("streams") or []
+        _QIX["V"] = np.int64(len(_QIX["vocab"]) + 1)
+    return _QIX
+
+
+def _quote_match_video(job):
+    """Find the verse / hadith runs in one video's chunks. Runs in a worker process.
+    job = (video_id, [(chunk_id, text), ...]) -> (video_id, [match, ...]) where a match is
+    {cid, s (stream), p0, p1 (source word span), t0, t1, w (matched words)}."""
+    import numpy as np
+    from difflib import SequenceMatcher
+    vid, chunks = job
+    X = _quote_index()
+    words, owner = [], []
+    for ci, (_, text) in enumerate(chunks):
+        ws = norm_text(text).split()
+        words += ws
+        owner += [ci] * len(ws)
+    n = len(words)
+    if n < QUOTE_MIN_WORDS_CUE:
+        return vid, []
+    vocab, V = X["vocab"], X["V"]
+    ids = np.fromiter((vocab.get(w, -1) for w in words), dtype=np.int64, count=n)
+    ok = (ids[:-2] >= 0) & (ids[1:-1] >= 0) & (ids[2:] >= 0)
+    ti = np.nonzero(ok)[0]
+    g = (ids[ti] * V + ids[ti + 1]) * V + ids[ti + 2]
+    gfull = np.full(max(0, n - 2), -1, dtype=np.int64)  # every 3-word run by position, for the formula test
+    gfull[ti] = g
+    ug, cnt = X["ug"], X["cnt"]
+    k = np.minimum(np.searchsorted(ug, g), len(ug) - 1)
+    hit = (ug[k] == g) & (cnt[k] <= QUOTE_MAX_GRAM)
+    ti, k = ti[hit], k[hit]
+    if not len(ti):
+        return vid, []
+    reps = cnt[k]
+    first = np.repeat(X["start"][k] - (np.cumsum(reps) - reps), reps) + np.arange(int(reps.sum()))
+    ht, hp, hr = np.repeat(ti, reps), X["post"][first], np.repeat(reps <= QUOTE_RARE, reps)
+    diag = hp - ht
+    keep = np.zeros(len(ht), dtype=bool)
+    for shift in (0, 2):  # a quote is >= 3 runs on (nearly) one diagonal; two offset buckets catch drift
+        _, inv, c = np.unique((diag + shift) // 4, return_inverse=True, return_counts=True)
+        keep |= c[inv] >= 3
+    ht, hp, hr = ht[keep], hp[keep], hr[keep]
+    if not len(ht):
+        return vid, []
+    soff, allw = X["soff"], X["allw"]
+    hs = np.searchsorted(soff, hp, side="right") - 1
+    order = np.lexsort((ht, hs))
+    chains = []  # [stream, t_first, p_first, t_last, p_last, runs, rare]
+    open_ = {}
+    for j in order:
+        s, t, p, r = int(hs[j]), int(ht[j]), int(hp[j]), bool(hr[j])
+        best = None
+        for c in open_.get(s, []):
+            if 0 < t - c[3] <= 8 and abs((p - t) - (c[4] - c[3])) <= 3 and p > c[4]:
+                best = c
+                break
+        if best is None:
+            best = [s, t, p, t, p, 0, 0]
+            chains.append(best)
+            open_.setdefault(s, []).insert(0, best)
+            del open_[s][4:]  # only the few most recent chains of a stream can still be extended
+        best[3], best[4] = t, p
+        best[5] += 1
+        best[6] += r
+    out = []
+    for s, t0, p0, t1, p1, runs, rare in chains:
+        if runs < 2 or rare < 2:
+            continue
+        t1, p1 = t1 + 3, min(p1 + 3, int(soff[s + 1]))
+        a, b = ids[t0:t1].tolist(), allw[p0:p1].tolist()
+        w = sum(m.size for m in SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks())
+        cue = any(x in _QUOTE_CUES for x in words[max(0, t0 - 8):t0])
+        if w < (QUOTE_MIN_WORDS_CUE if cue else QUOTE_MIN_WORDS) or w < 0.6 * len(a) or w < 0.6 * len(b):
+            continue
+        if np.isin(gfull[t0:max(t0 + 1, t1 - 2)], X["formula"]).mean() >= 0.5:
+            continue  # a lesson opener / closer, not a quote
+        out.append({"cid": chunks[owner[t0]][0], "s": s, "p0": p0, "p1": p1, "t0": t0, "t1": t1, "w": w})
+    return vid, _quote_pick(out, X)
+
+
+def _quote_pick(found, X):
+    """One match per recited passage: the same words can match the Quran and a hadith that quotes it,
+    or the same hadith in several books. Quran wins unless a hadith matched clearly more; otherwise
+    the most-matched hadith wins (ties go to the earlier book) and the rest are listed as 'also in'."""
+    rank = {b: i for i, (b, _, _) in enumerate(HADITH_BOOKS)}
+
+    def key(m):
+        st = X["streams"][m["s"]]
+        return (-m["w"] + (2 if st[0] == "h" else 0), rank.get(st[2], -1), m["s"])
+
+    picked = []
+    for m in sorted(found, key=key):
+        for p in picked:
+            ov = min(m["t1"], p["t1"]) - max(m["t0"], p["t0"])
+            if ov > 0.5 * (m["t1"] - m["t0"]):
+                if X["streams"][m["s"]][0] == "h" and X["streams"][p["s"]][0] == "h" \
+                        and m["w"] >= p["w"] - 1 and len(p.setdefault("also", [])) < 6:
+                    p["also"].append(m["s"])
+                break
+        else:
+            picked.append(m)
+    return sorted(picked, key=lambda m: m["t0"])
+
+
+def _quotes_path(ch):
+    return cpaths(ch)["base"] / "quotes.json"  # the per-video cache; not published (quotes.db is)
+
+
+def quotes_channel(ch, pool, progress=None):
+    """Match one Arabic channel's videos (only those new or changed since the last run) and save
+    <channel>/quotes.json: {src, lib, videos: {vid: {h, m: [...]}}}. Returns the videos matched."""
+    import hashlib
+    path = _quotes_path(ch)
+    src = library_src() + "|" + index_src(ch)
+    old = read_obj(path)
+    if old.get("src") == src:
+        return 0
+    lib_same = old.get("lib") == library_src()
+    by_vid = {}
+    for c in load_chunks(ch):
+        by_vid.setdefault(c["video_id"], []).append(c)
+    videos, todo = {}, []
+    prev = (old.get("videos") or {}) if lib_same else {}  # a new library or matcher redoes every video
+    for vid, cs in by_vid.items():
+        cs.sort(key=lambda c: c.get("n", 0))
+        h = hashlib.md5("\n".join(c["chunk_id"] + c["text"] for c in cs).encode("utf-8")).hexdigest()[:16]
+        if vid in prev and prev[vid].get("h") == h:
+            videos[vid] = prev[vid]
+            if progress:
+                progress()
+        else:
+            videos[vid] = {"h": h, "m": []}
+            todo.append((vid, [(c["chunk_id"], c["text"]) for c in cs]))
+    X = _quote_index()
+    toks = {}
+    for vid, found in pool.map(_quote_match_video, todo, chunksize=8):
+        ms = [_quote_ref(m, X) for m in found]
+        for m in ms:
+            if "x" in m:  # matched words -> the hadith's own whitespace tokens, to show it with harakat
+                _, book, i = m["ref"].split(":")
+                if m["ref"] not in toks:
+                    hs = _hadiths(book)
+                    toks[m["ref"]] = _quote_tokens(hs[int(i)].get("text") if int(i) < len(hs) else "")[1]
+                tk = toks[m["ref"]]
+                m["x"] = [tk[m["x"][0]], tk[m["x"][1] - 1]] if tk and m["x"][1] <= len(tk) else None
+        videos[vid]["m"] = ms
+        if progress:
+            progress()
+    write_json(path, {"src": src, "lib": library_src(), "videos": videos})
+    return len(todo)
+
+
+_QTEXT = {}  # book -> its hadith list, loaded on demand in the main process
+
+
+def _hadiths(book, lang="ara"):
+    key = f"{lang}-{book}"
+    if key not in _QTEXT:
+        _QTEXT[key] = read_obj(LIBRARY / "hadith" / f"{key}.json").get("hadiths") or []
+    return _QTEXT[key]
+
+
+def _hadith_num(h):
+    """The number people cite: Muslim's is Fu'ad 'Abd al-Baqi's (1907, not the running 4927)."""
+    n = h.get("arabicnumber") or h.get("hadithnumber")
+    try:
+        return str(int(float(n)))
+    except (TypeError, ValueError):
+        return str(n or "")
+
+
+QUOTE_DB = LIBRARY / "quotes.db"
+
+
+def build_quote_db(channels):
+    """output/library/quotes.db, the one file the website reads: which verses / hadith each moment
+    matches (table quotes) and the text shown for them (table refs: every Quran verse in Uthmani
+    script; each matched hadith in Arabic with harakat, its English and gradings). Published with the
+    data; the brain looks moments up in it on demand, so none of it sits in memory."""
+    import sqlite3
+    import xml.etree.ElementTree as ET
+    names = {b: (en, ar) for b, en, ar in HADITH_BOOKS}
+    tmp = QUOTE_DB.with_suffix(".tmp")
+    tmp.unlink(missing_ok=True)
+    con = sqlite3.connect(tmp)
+    con.execute("CREATE TABLE quotes (cid TEXT PRIMARY KEY, m TEXT)")
+    con.execute("CREATE TABLE refs (ref TEXT PRIMARY KEY, d TEXT)")
+    used, also, n = set(), set(), 0
+    for ch in channels:
+        rows = {}
+        for v in (read_obj(_quotes_path(ch)).get("videos") or {}).values():
+            for m in v.get("m") or []:
+                rows.setdefault(m["cid"], []).append([m["ref"], m.get("x"), m.get("also") or []])
+                if m["ref"].startswith("h:"):
+                    used.add(m["ref"])
+                also.update(m.get("also") or [])
+        con.executemany("INSERT OR REPLACE INTO quotes VALUES (?, ?)",
+                        ((cid, json.dumps(ms, ensure_ascii=False, separators=(",", ":"))) for cid, ms in rows.items()))
+        n += sum(len(ms) for ms in rows.values())
+    suras = {int(s.get("index")): s for s in ET.parse(LIBRARY / "quran" / "quran-data.xml").getroot().iter("sura")}
+    verses = []
+    for s, a, text in _quran_lines("quran-uthmani.txt"):
+        su = suras.get(s)
+        verses.append((f"q:{s}:{a}", json.dumps({"ar": text, "en": su.get("tname") if su is not None else "",
+                                                 "name": su.get("name") if su is not None else ""},
+                                                ensure_ascii=False)))
+    con.executemany("INSERT INTO refs VALUES (?, ?)", verses)
+    hrows = []
+    for ref in sorted(used | also):
+        _, book, i = ref.split(":")
+        ara, eng = _hadiths(book), _hadiths(book, "eng")
+        h = ara[int(i)] if int(i) < len(ara) else {}
+        r = {"book": book, "book_en": names.get(book, ("", ""))[0], "book_ar": names.get(book, ("", ""))[1],
+             "n": _hadith_num(h)}
+        if ref in used:  # 'also in' books only need the name and number
+            e = next((x for x in eng[max(0, int(i) - 3):int(i) + 4]
+                      if x.get("hadithnumber") == h.get("hadithnumber")), {})
+            r.update({"ar": h.get("text") or "", "en": e.get("text") or "",
+                      "grades": [{"by": g.get("name"), "grade": g.get("grade")}
+                                 for g in h.get("grades") or [] if g.get("grade")]})
+        hrows.append((ref, json.dumps(r, ensure_ascii=False)))
+    con.executemany("INSERT INTO refs VALUES (?, ?)", hrows)
+    con.commit()
+    con.close()
+    replace_file(tmp, QUOTE_DB)
+    return n, len(used)
+
+
+def _quote_ref(m, X):
+    """A raw match as the compact record saved per video: chunk, reference keys, matched words."""
+    st = X["streams"][m["s"]]
+    out = {"cid": m["cid"], "w": m["w"]}
+    if st[0] == "q":
+        qv, qsa = X["qverse"], X["qsa"]
+        a, b = qsa[qv[m["p0"]]], qsa[qv[m["p1"] - 1]]
+        out["ref"] = f"q:{a[0]}:{a[1]}:{b[0]}:{b[1]}"
+    else:
+        base = int(X["soff"][m["s"]])
+        out["ref"] = f"h:{st[2]}:{st[1]}"
+        out["x"] = [m["p0"] - base, m["p1"] - base]  # matched words; turned into original tokens below
+    also = [f"h:{X['streams'][s][2]}:{X['streams'][s][1]}" for s in m.get("also", [])]
+    if also:
+        out["also"] = also
+    return out
+
+
+def match_quotes(channels):
+    """Update step: mark the moments that recite a Quran verse or a hadith, on the Arabic channels.
+    Skipped quietly when the library hasn't been downloaded. Only new / changed videos are matched."""
+    if library_src() is None:
+        return
+    chans = [c for c in channels if c.get("search") == "keyword" and (cpaths(c)["data"] / "chunks.jsonl").exists()]
+    if not chans:
+        return
+    todo = [c for c in chans if read_obj(_quotes_path(c)).get("src") != library_src() + "|" + index_src(c)]
+    if not todo:
+        try:  # all matched already; just make sure quotes.db was rebuilt after the last match
+            db_t = QUOTE_DB.stat().st_mtime_ns
+            if all(_quotes_path(c).stat().st_mtime_ns <= db_t for c in chans if _quotes_path(c).exists()):
+                return
+        except OSError:
+            pass
+        build_quote_db(chans)
+        return
+    from concurrent.futures import ProcessPoolExecutor
+    head("Finding Quran verses and hadith in the lectures")
+    if read_obj(LIBRARY / "index" / "quotes.json").get("src") != library_src():
+        status("    indexing the Quran and hadith books ...")
+        build_quote_index()
+        status_done()
+        _QIX.clear()
+    t0, done = time.time(), [0]
+    total = max(1, sum(len(raw_ids(c)) for c in todo))
+
+    def tick():
+        done[0] += 1
+        if done[0] % 50 == 0:
+            status(f"    {bar(min(done[0], total), total, 18)}  {done[0]:,} videos checked")
+
+    workers = max(1, (os.cpu_count() or 2) - 1)
+    n = 0
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        for ch in todo:
+            try:
+                n += quotes_channel(ch, pool, tick)
+            except Exception as e:
+                err(f"  {channel_label(ch)}: quote matching failed ({str(e)[:150]})")
+    status_done()
+    found, hadith = build_quote_db(chans)
+    ok(f"  Checked {plural(n, 'video')} in {fmt_duration(time.time() - t0)}. "
+       f"{found:,} Quran / hadith recitations marked ({hadith:,} different hadith) across the Arabic channels.")
+
+
 TERMS_TOOL = {
     "name": "search_terms",
     "description": "Search terms for a transcript archive.",
@@ -3705,6 +4148,10 @@ def _update(settings, unattended, only=None):
         webapp.build()
     except Exception as e:
         warn(f"  (couldn't refresh the app view: {str(e)[:100]})")
+    try:
+        match_quotes(all_ch)
+    except Exception as e:
+        warn(f"  (couldn't mark the Quran / hadith recitations: {str(e)[:150]})")
 
     fails = sum(1 for ch in all_ch for f in load_failed(ch).values() if f.get("attempts", 0) >= MAX_FAIL_ATTEMPTS)
     left = sum(len(pending_transcripts(ch)) for ch in all_ch)
@@ -4183,6 +4630,7 @@ def load_search(settings, scope):
             "names": ", ".join(channel_label(c) for c in scope),
             "row_cid": row_cid, "slug_to_cid": slug_to_cid,
             "vid_ids": vid_ids, "vid_mat": vid_mat, "vid_rows": vid_rows, "vid_cid": vid_cid,
+            "quote_db": QUOTE_DB if QUOTE_DB.exists() else None,  # Quran / hadith per moment, read on demand
             "channels_meta": [{"slug": c["slug"], "name": full_name(c),
                                "kind": "keyword" if c.get("search") == "keyword" else "meaning"}
                               for c in scope],
@@ -4439,10 +4887,79 @@ def source_json(ctx, chunk, n):
     window of surrounding transcript (`context` + `citedIdx`). Shared by /ask and the stream.
     `video_id` + `slug` let the site fetch the video's full transcript on demand (download button)."""
     lines, ci = transcript_context(ctx, chunk)
-    return {"n": n, "timestamp": chunk["timestamp"], "title": chunk["title"],
-            "channel": chunk.get("channel"), "date": chunk.get("date"), "url": chunk["url"],
-            "video_id": chunk.get("video_id"), "slug": chunk.get("_slug"),
-            "context": lines, "citedIdx": ci}
+    out = {"n": n, "timestamp": chunk["timestamp"], "title": chunk["title"],
+           "channel": chunk.get("channel"), "date": chunk.get("date"), "url": chunk["url"],
+           "video_id": chunk.get("video_id"), "slug": chunk.get("_slug"),
+           "context": lines, "citedIdx": ci}
+    try:
+        qs = quote_json(ctx, chunk.get("chunk_id"))
+    except Exception:
+        qs = []  # the labels are extra: never lose a source card over them
+    if qs:
+        out["quotes"] = qs
+    return out
+
+
+def quote_json(ctx, chunk_id):
+    """The Quran verses / hadith recited in one moment, ready to show under its source card. A Quran
+    passage carries its verses in Uthmani script; a hadith the matched words (`ar`, with harakat), the
+    whole hadith (`ar_full`), the English and its gradings, and `also` the other books with the same
+    wording. A passage repeated inside a longer one from the same moment is shown once."""
+    db = ctx.get("quote_db")
+    if not db or not chunk_id:
+        return []
+    import sqlite3
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        row = con.execute("SELECT m FROM quotes WHERE cid = ?", (chunk_id,)).fetchone()
+        if not row:
+            return []
+        found = json.loads(row[0])
+
+        def ref(key):
+            r = con.execute("SELECT d FROM refs WHERE ref = ?", (key,)).fetchone()
+            return json.loads(r[0]) if r else None
+
+        quran, out, seen = [], [], set()
+        for key, x, also in found:
+            p = key.split(":")
+            if p[0] == "q":
+                quran.append(tuple(map(int, p[1:5])))
+                continue
+            if key in seen:
+                continue
+            seen.add(key)
+            r = ref(key)
+            if not r:
+                continue
+            toks = (r.get("ar") or "").split()
+            part = " ".join(toks[x[0]:x[1] + 1]) if x and x[1] < len(toks) else ""
+            names = [ref(a) for a in also]
+            out.append({"kind": "hadith", "book": r["book"], "book_en": r["book_en"], "book_ar": r["book_ar"],
+                        "num": r["n"], "ar": part or r.get("ar", ""), "ar_full": r.get("ar", ""),
+                        "en": r.get("en", ""), "grades": r.get("grades") or [],
+                        "also": [{"book_en": a["book_en"], "book_ar": a["book_ar"], "num": a["n"]} for a in names if a]})
+        spans = []  # overlapping or back-to-back verse runs of one sura are one recitation
+        for s1, a1, s2, a2 in sorted(set(quran)):
+            if s2 != s1:  # runs into the next sura: show the first sura's part only
+                s2, a2 = s1, 999
+            if spans and spans[-1][0] == s1 and a1 <= spans[-1][2] + 1:
+                spans[-1][2] = max(spans[-1][2], a2)
+            else:
+                spans.append([s1, a1, a2])
+        for s1, a1, a2 in spans:
+            rows = [ref(f"q:{s1}:{a}") for a in range(a1, min(a2, a1 + 11) + 1)]
+            rows = [(a1 + i, r) for i, r in enumerate(rows) if r]
+            if not rows:
+                continue
+            last = a2 if a2 != 999 else rows[-1][0]  # a long recitation is labelled in full, shown in part
+            out.append({"kind": "quran", "ref": f"{s1}:{a1}" + (f"-{last}" if last != a1 else ""),
+                        "sura_en": rows[0][1]["en"], "sura_ar": rows[0][1]["name"],
+                        "ar": " ".join(f"{r['ar']} ﴿{a}﴾" for a, r in rows) + (" …" if rows[-1][0] < last else ""),
+                        "url": f"https://quran.com/{s1}/{a1}" + (f"-{last}" if last != a1 else "")})
+        return out
+    finally:
+        con.close()
 
 
 def full_transcript(ctx, video_id, slug=None):
@@ -5440,6 +5957,8 @@ def publish_data(settings):
             tar.add(p["search"], arcname=f"{ch['slug']}/search")
             added += 1
             say(f"  + {channel_label(ch)}")
+        if QUOTE_DB.exists():  # which moments recite a verse / hadith, and those texts
+            tar.add(QUOTE_DB, arcname="library/quotes.db")
         tar.close()  # writes the tar end-of-archive blocks into the gzip stream
     finally:
         gz.close()

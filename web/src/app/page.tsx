@@ -26,7 +26,22 @@ type Source = {
   slug?: string | null; // channel slug (set for keyword channels, so the brain reads the right db)
   context?: Line[]; // a short window of surrounding transcript
   citedIdx?: number; // which line in `context` is the cited moment
+  quotes?: Quote[]; // Quran verses / hadith whose wording this moment matches
 };
+type Quote =
+  | { kind: "quran"; ref: string; sura_en: string; sura_ar: string; ar: string; url: string }
+  | {
+      kind: "hadith";
+      book: string;
+      book_en: string;
+      book_ar: string;
+      num: string;
+      ar: string; // the matched words, with harakat
+      ar_full?: string;
+      en?: string;
+      grades?: { by: string; grade: string }[];
+      also?: { book_en: string; book_ar: string; num: string }[];
+    };
 type Coverage = { moments: number; videos: number; channels: number };
 type Answer = {
   q: string;
@@ -689,6 +704,10 @@ export default function Home() {
           slug: s.slug ?? null,
           context: (s.context ?? []).map((l) => ({ ts: l.ts ?? null, text: l.text })),
           citedIdx: s.citedIdx ?? 0,
+          // the matched passage only: the whole hadith and its English stay out of the saved chat
+          ...(s.quotes?.length
+            ? { quotes: s.quotes.map((q) => (q.kind === "hadith" ? { ...q, ar_full: "", en: "" } : q)) }
+            : {}),
         })),
         coverage,
         cost_usd: cost ?? null,
@@ -2107,6 +2126,7 @@ function SourceCard({ s }: { s: Source }) {
               {cited.text}
             </span>
           ) : null}
+          {s.quotes?.length ? <QuoteList quotes={s.quotes} /> : null}
         </div>
         <div className="mt-0.5 flex shrink-0 items-center gap-0.5">
           <button
@@ -2161,6 +2181,99 @@ function SourceCard({ s }: { s: Source }) {
               {ln.text}
             </p>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/* The Quran verses / hadith whose wording a moment matches: a chip each, opening the text (Uthmani
+   Quran, or the hadith with harakat + English + gradings). Worded as "matches", since it is found
+   automatically from the captions. */
+function QuoteList({ quotes }: { quotes: Quote[] }) {
+  const { t, lang } = useLang();
+  const [open, setOpen] = useState<number | null>(null);
+  const [full, setFull] = useState(false);
+  const label = (q: Quote) =>
+    q.kind === "quran"
+      ? `${t("quote.quran")} · ${lang === "ar" ? q.sura_ar : q.sura_en} ${q.ref}`
+      : `${lang === "ar" ? q.book_ar : q.book_en} ${q.num}`;
+  const q = open !== null ? quotes[open] : null;
+  return (
+    <div className="mt-2">
+      <div className="flex flex-wrap gap-1.5">
+        {quotes.map((x, i) => (
+          <button
+            key={i}
+            type="button"
+            onClick={() => {
+              setOpen(open === i ? null : i);
+              setFull(false);
+            }}
+            aria-expanded={open === i}
+            title={x.kind === "quran" ? t("quote.matchesQuran") : t("quote.matchesHadith")}
+            className={`inline-flex items-center gap-1 rounded-full border px-2 py-0.5 text-[11px] font-medium transition ${
+              open === i ? "border-gold/60 bg-gold/10 text-ink" : "border-line text-muted hover:border-line2 hover:text-ink"
+            }`}
+          >
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" aria-hidden className="text-gold">
+              <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5v-15ZM4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+            </svg>
+            <span dir="auto">{label(x)}</span>
+          </button>
+        ))}
+      </div>
+      {q && (
+        <div className="mt-2 rounded-lg border border-line bg-paper/60 px-3 py-2.5">
+          <p className="text-[11px] font-medium text-faint">
+            {q.kind === "quran" ? t("quote.matchesQuran") : t("quote.matchesHadith")}
+          </p>
+          <p dir="rtl" lang="ar" className="mt-1.5 font-serif text-[16px] leading-loose text-ink">
+            {q.kind === "hadith" && full && q.ar_full ? q.ar_full : q.ar}
+            {q.kind === "hadith" && !full && q.ar_full && q.ar_full !== q.ar ? " …" : ""}
+          </p>
+          {q.kind === "hadith" && q.ar_full && q.ar_full !== q.ar && (
+            <button type="button" onClick={() => setFull((f) => !f)} className="mt-1 text-[11px] font-medium text-accent hover:underline">
+              {full ? t("quote.less") : t("quote.full")}
+            </button>
+          )}
+          {q.kind === "hadith" && full && q.en && (
+            <p dir="ltr" className="mt-2 text-[13px] leading-relaxed text-muted">{q.en}</p>
+          )}
+          {q.kind === "hadith" && !!q.grades?.length && (
+            <p className="mt-2 text-[12px] text-muted">
+              <span className="font-medium text-faint">{t("quote.grade")}: </span>
+              {q.grades.map((g) => `${g.by}: ${g.grade}`).join(" · ")}
+            </p>
+          )}
+          {q.kind === "hadith" && !!q.also?.length && (
+            <p className="mt-1 text-[12px] text-muted">
+              <span className="font-medium text-faint">{t("quote.alsoIn")}: </span>
+              {q.also.map((a) => `${lang === "ar" ? a.book_ar : a.book_en} ${a.num}`).join(" · ")}
+            </p>
+          )}
+          <p className="mt-2 text-[11px] leading-snug text-faint">
+            {t("quote.note")}{" "}
+            {q.kind === "quran" ? (
+              <>
+                <a href={q.url} target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+                  Quran.com
+                </a>
+                {" · "}
+                {t("quote.quranSource")}{" "}
+                <a href="https://tanzil.net" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+                  Tanzil.net
+                </a>
+              </>
+            ) : (
+              <>
+                {t("quote.hadithSource")}{" "}
+                <a href="https://github.com/fawazahmed0/hadith-api" target="_blank" rel="noopener noreferrer" className="text-accent hover:underline">
+                  hadith-api
+                </a>
+              </>
+            )}
+          </p>
         </div>
       )}
     </div>
