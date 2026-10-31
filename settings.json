@@ -418,6 +418,22 @@
       "title_include": [],
       "title_exclude": [],
       "search": "keyword"
+    },
+    {
+      "handle": "@MohammedHijab",
+      "slug": "MohammedHijab",
+      "name": "Mohammed Hijab",
+      "language": "en",
+      "videos": true,
+      "lives": true,
+      "shorts": false,
+      "max_videos": 0,
+      "full_refresh": false,
+      "min_minutes": 0,
+      "playlist": null,
+      "title_include": [],
+      "title_exclude": [],
+      "search": "semantic"
     }
   ],
   "answer_language": "auto",
