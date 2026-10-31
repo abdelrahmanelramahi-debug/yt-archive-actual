@@ -78,6 +78,7 @@ export async function POST(req: NextRequest) {
         "Content-Type": "application/json",
         ...(BRAIN_KEY ? { "X-Brain-Key": BRAIN_KEY } : {}),
         ...(clientIp ? { "X-Client-IP": clientIp } : {}),
+        "X-User-Id": uid, // the answer job is theirs alone to reconnect to (/api/ask/job)
       },
       body: JSON.stringify({
         question,

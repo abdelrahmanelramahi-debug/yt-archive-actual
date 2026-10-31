@@ -16,6 +16,7 @@ import json
 import os
 import threading
 import time
+import uuid
 from contextlib import asynccontextmanager
 
 import numpy as np
@@ -169,12 +170,68 @@ def _sse(event, data):
     return f"event: {event}\ndata: {json.dumps(data, ensure_ascii=False)}\n\n"
 
 
+# Answers run as background jobs, so one keeps writing when the reader's connection drops (a phone
+# switching apps suspends the page). The stream just follows the job; the page reconnects with
+# /ask/job and picks up from the last event it got. Jobs live in memory for JOB_TTL seconds.
+JOBS = {}
+JOBS_LOCK = threading.Lock()
+JOB_TTL = 30 * 60
+
+
+def _run_job(job, ctx, q, req):
+    def put(event, data):
+        with job["cond"]:
+            job["events"].append(_sse(event, data))
+            job["cond"].notify_all()
+
+    try:
+        for kind, payload in brain.answer_question_stream(ctx, q, channels=req.channels, mode=req.mode, style=req.style, channel_names=req.channel_names, cand_max=req.cand_max, answer_max=req.answer_max):
+            if kind == "status":
+                put("status", {"stage": payload})
+            elif kind == "delta":
+                put("delta", {"text": payload})
+            elif kind == "source":  # one cited moment, streamed in as the answer references it
+                put("source", payload)
+            elif kind == "empty":
+                put("empty", {})
+            elif kind == "done":
+                brain.add_spend("claude", payload["usd"], "web question")
+                put("done", {"coverage": payload["coverage"], "cost_usd": round(payload["usd"], 4)})
+    except Exception as e:
+        msg = str(e).lower()
+        put("error", {"error": "Claude credit is used up" if "credit" in msg or "billing" in msg
+                      else f"answer failed: {str(e)[:200]}"})
+    finally:
+        with job["cond"]:
+            job["done"] = True
+            job["cond"].notify_all()
+
+
+def _follow(job, after):
+    """SSE for a job from event `after` on, live until it finishes. A comment line every 15 s of
+    quiet keeps proxies from closing the connection while Claude is still reading."""
+    i = max(0, after)
+    while True:
+        with job["cond"]:
+            if i >= len(job["events"]) and not job["done"]:
+                job["cond"].wait(timeout=15)
+            batch, finished = job["events"][i:], job["done"]
+        for ev in batch:
+            yield ev
+        i += len(batch)
+        if finished and i >= len(job["events"]):
+            return
+        if not batch:
+            yield ": ping\n\n"
+
+
 @app.post("/ask/stream")
 def ask_stream(req: AskRequest, request: Request, x_brain_key: str = Header(None),
-               x_client_ip: str = Header(None)):
-    """The deluxe Q&A streamed as Server-Sent Events: 'status' (searching/reading/writing), many
-    'delta' (answer text as it writes), then 'done' (sources + cost) or 'empty'. Same answer as
-    /ask - the frontend falls back to /ask when a stream can't be opened."""
+               x_client_ip: str = Header(None), x_user_id: str = Header(None)):
+    """The deluxe Q&A streamed as Server-Sent Events: first 'job' (its id, for reconnecting), then
+    'status' (searching/reading/writing), many 'delta' (answer text as it writes), the 'source's,
+    then 'done' (coverage + cost), 'empty' or 'error'. Same answer as /ask - the frontend falls back
+    to /ask when a stream can't be opened at all."""
     _check_key(x_brain_key)
     ctx = _ctx()
     q = (req.question or "").strip()
@@ -184,28 +241,34 @@ def ask_stream(req: AskRequest, request: Request, x_brain_key: str = Header(None
     blocked = _rate_limited(ip)
     if blocked:
         raise HTTPException(status_code=429, detail=blocked)
+    now = time.time()
+    job = {"id": uuid.uuid4().hex, "uid": x_user_id or "", "t": now, "events": [], "done": False,
+           "cond": threading.Condition()}
+    with JOBS_LOCK:
+        for k in [k for k, j in JOBS.items() if now - j["t"] > JOB_TTL]:
+            del JOBS[k]
+        JOBS[job["id"]] = job
+    threading.Thread(target=_run_job, args=(job, ctx, q, req), daemon=True).start()
 
     def gen():
-        try:
-            for kind, payload in brain.answer_question_stream(ctx, q, channels=req.channels, mode=req.mode, style=req.style, channel_names=req.channel_names, cand_max=req.cand_max, answer_max=req.answer_max):
-                if kind == "status":
-                    yield _sse("status", {"stage": payload})
-                elif kind == "delta":
-                    yield _sse("delta", {"text": payload})
-                elif kind == "source":  # one cited moment, streamed in as the answer references it
-                    yield _sse("source", payload)
-                elif kind == "empty":
-                    yield _sse("empty", {})
-                elif kind == "done":
-                    brain.add_spend("claude", payload["usd"], "web question")
-                    yield _sse("done", {"coverage": payload["coverage"], "cost_usd": round(payload["usd"], 4)})
-        except Exception as e:
-            msg = str(e).lower()
-            detail = ("Claude credit is used up" if "credit" in msg or "billing" in msg
-                      else f"answer failed: {str(e)[:200]}")
-            yield _sse("error", {"error": detail})
+        yield _sse("job", {"id": job["id"]})
+        yield from _follow(job, 0)
 
     return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@app.get("/ask/job")
+def ask_job(id: str = Query(..., min_length=8), after: int = 0, x_brain_key: str = Header(None),
+            x_user_id: str = Header(None)):
+    """Reconnect to an answer still running (or finished in the last half hour): its events from
+    number `after` on. Only the account that asked can read it. No Claude call, no spend."""
+    _check_key(x_brain_key)
+    with JOBS_LOCK:
+        job = JOBS.get(id)
+    if job is None or (job["uid"] and job["uid"] != (x_user_id or "")):
+        raise HTTPException(status_code=404, detail="that answer is no longer available")
+    return StreamingResponse(_follow(job, after), media_type="text/event-stream",
                              headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
 
 

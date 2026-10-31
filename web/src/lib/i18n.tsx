@@ -76,6 +76,7 @@ const DICT: Record<Lang, Record<string, string>> = {
     "err.signInAgain": "Please sign in again.",
     "err.server": "Could not reach the server.",
     "err.generic": "Something went wrong.",
+    "err.interrupted": "That answer was interrupted before it finished. Please ask again.",
 
     "signin.welcome": "Welcome back",
     "signin.createTitle": "Create your account",
@@ -151,6 +152,8 @@ const DICT: Record<Lang, Record<string, string>> = {
     "whatsnew.comprehensive.b": "Answers now lay out each channel's stance in depth, with headings and quotes — if a matter is discussed in many places, you get all of them, not a sample.",
     "whatsnew.download.t": "Download transcripts",
     "whatsnew.download.b": "Every source now has a download button for that video's full transcript.",
+    "whatsnew.resume.t": "Answers keep going when you leave",
+    "whatsnew.resume.b": "Switch apps or lock your phone mid-answer — it keeps being written, and it's there in full when you come back.",
     "whatsnew.quotes.t": "Quran & hadith references",
     "whatsnew.quotes.b": "When a scholar recites a verse or a hadith, the source now shows which one it matches — the verse in Uthmani script, or the hadith with its book, number and grading. Arabic lectures for now.",
     "whatsnew.fixes.t": "Small fixes",
@@ -244,6 +247,7 @@ const DICT: Record<Lang, Record<string, string>> = {
     "err.signInAgain": "يرجى تسجيل الدخول من جديد.",
     "err.server": "تعذّر الوصول إلى الخادم.",
     "err.generic": "حدث خطأٌ ما.",
+    "err.interrupted": "انقطعت الإجابة قبل أن تكتمل. أعد طرح السؤال من فضلك.",
 
     "signin.welcome": "مرحبًا بعودتك",
     "signin.createTitle": "أنشئ حسابك",
@@ -319,6 +323,8 @@ const DICT: Record<Lang, Record<string, string>> = {
     "whatsnew.comprehensive.b": "تعرض الإجابات الآن موقف كل قناة بالتفصيل، بعناوين واقتباسات — وإن نوقشت المسألة في مواضع كثيرة حصلت عليها كلها، لا عيّنة منها.",
     "whatsnew.download.t": "تنزيل النصوص",
     "whatsnew.download.b": "لكل مصدر الآن زرّ تنزيل لنصّ ذلك المقطع كاملًا.",
+    "whatsnew.resume.t": "الإجابة تكتمل وإن غادرت",
+    "whatsnew.resume.b": "انتقل إلى تطبيق آخر أو اقفل هاتفك أثناء الإجابة — تستمر كتابتها، وتجدها كاملة حين تعود.",
     "whatsnew.quotes.t": "عزو الآيات والأحاديث",
     "whatsnew.quotes.b": "حين يتلو العالم آيةً أو يروي حديثًا، يبيّن المصدر الآن ما يطابقه — الآية بالرسم العثماني، أو الحديث بكتابه ورقمه وحكمه. للدروس العربية حاليًا.",
     "whatsnew.fixes.t": "إصلاحات صغيرة",

@@ -55,6 +55,12 @@ const Fixes = (
 // entries stay as flip-back pages. The id of the top entry is what "seen" is tracked against.
 const UPDATES: { id: string; items: { key: string; icon: ReactNode }[] }[] = [
   {
+    id: "2026-10-31f",
+    items: [
+      { key: "resume", icon: History },
+    ],
+  },
+  {
     id: "2026-10-31e",
     items: [
       { key: "quotes", icon: Book },

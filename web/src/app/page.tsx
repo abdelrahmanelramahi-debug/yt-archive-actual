@@ -52,6 +52,51 @@ type Answer = {
   cost_usd?: number;
   error?: string;
 };
+const EMPTY_COV: Coverage = { moments: 0, videos: 0, channels: 0 };
+
+// An answer being written: what has arrived so far, how many of its events (`seen`), and the brain
+// job to reconnect to if the connection drops.
+type StreamState = { text: string; acc: string; srcs: Source[]; gotDelta: boolean; seen: number; jobId: string | null };
+
+// The answer in progress, kept so a page the phone reloaded can reconnect to it.
+type Pending = { id: string; q: string; uid: string; t: number };
+const PENDING_KEY = "pendingAnswer";
+function savePending(p: Pending) {
+  try {
+    localStorage.setItem(PENDING_KEY, JSON.stringify(p));
+  } catch {
+    /* storage blocked: reconnecting still works while the page stays open */
+  }
+}
+function readPending(): Pending | null {
+  try {
+    const p = JSON.parse(localStorage.getItem(PENDING_KEY) || "null");
+    return p && typeof p.id === "string" && typeof p.q === "string" ? p : null;
+  } catch {
+    return null;
+  }
+}
+function clearPending() {
+  try {
+    localStorage.removeItem(PENDING_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+// Resolves once the page is in front again (immediately if it already is).
+function whenVisible(): Promise<void> {
+  if (typeof document === "undefined" || document.visibilityState === "visible") return Promise.resolve();
+  return new Promise((res) => {
+    const on = () => {
+      if (document.visibilityState === "visible") {
+        document.removeEventListener("visibilitychange", on);
+        res();
+      }
+    };
+    document.addEventListener("visibilitychange", on);
+  });
+}
+
 type Channel = { slug: string; name: string; kind: string; en?: string; ar?: string };
 type Mode = { id: string; label: string; usd: number };
 
@@ -839,8 +884,8 @@ export default function Home() {
     }
   }
 
-  // Open the SSE stream and drive the UI from its events. Returns once a terminal event (done /
-  // empty / handled error) is reached; throws before any answer text shows so ask() can fall back.
+  // Open the SSE stream and drive the UI from its events (see followAnswer). Throws only when no
+  // answer was started at all, so ask() can fall back to the one-shot endpoint.
   async function streamAnswer(text: string, payload: object, headers: HeadersInit) {
     const r = await fetch("/api/ask/stream", {
       method: "POST",
@@ -865,20 +910,71 @@ export default function Home() {
       }
       throw new Error("stream unavailable");
     }
-    const reader = r.body.getReader();
+    await followAnswer({ text, acc: "", srcs: [], gotDelta: false, seen: 0, jobId: null }, r.body);
+  }
+
+  // Drive the UI from an answer's events until it finishes. The answer runs as a job on the brain,
+  // so when the connection drops — a phone pauses the page when you switch apps — the job keeps
+  // writing; this waits until the page is visible again and reconnects from the last event it got.
+  // The job id is also kept in localStorage, so a page the phone reloaded picks the answer back up.
+  async function followAnswer(st: StreamState, first: ReadableStream<Uint8Array> | null) {
+    let body = first;
+    let tries = 0;
+    for (;;) {
+      if (body) {
+        const before = st.seen;
+        let outcome: "terminal" | "ended" = "ended";
+        try {
+          outcome = await readAnswer(st, body);
+        } catch {
+          /* connection dropped: reconnect below */
+        }
+        if (outcome === "terminal") return;
+        if (st.seen > before) tries = 0; // it was making progress: start the retry count afresh
+      }
+      body = null;
+      if (!st.jobId || tries >= 8) break;
+      tries++;
+      await whenVisible();
+      await new Promise((res) => setTimeout(res, tries === 1 ? 250 : 1500));
+      try {
+        const token = await idToken();
+        const r = await fetch(`/api/ask/job?id=${st.jobId}&after=${st.seen}`, {
+          headers: token ? { Authorization: `Bearer ${token}` } : undefined,
+        });
+        if (r.status === 404) break; // the brain restarted, or the answer is too old to fetch
+        if (r.ok && r.body) body = r.body;
+      } catch {
+        /* still offline: try again */
+      }
+    }
+    clearPending();
+    if (st.gotDelta) {
+      // couldn't finish: keep what arrived, with whatever evidences came with it
+      finishAnswer(st, EMPTY_COV);
+      return;
+    }
+    if (st.jobId) {
+      setError(t("err.interrupted"));
+      setStatus("error");
+      setLive(false);
+      return;
+    }
+    throw new Error("no data"); // nothing started — let ask() fall back
+  }
+
+  // Read one connection's events into `st`. "terminal" once the answer is finished (or failed) and
+  // shown; "ended" if the connection closed before that.
+  async function readAnswer(st: StreamState, body: ReadableStream<Uint8Array>): Promise<"terminal" | "ended"> {
+    const reader = body.getReader();
     const dec = new TextDecoder();
     let buf = "";
-    let acc = "";
-    const srcs: Source[] = []; // evidences accumulate as their citations stream in
-    let gotDelta = false;
-    let done: { coverage: Coverage; cost_usd?: number } | null = null;
-    const EMPTY_COV: Coverage = { moments: 0, videos: 0, channels: 0 };
     // Coalesce token updates to one render per frame — re-parsing the whole answer on every token
     // janks the stream on phones.
     let rafPending = false;
     const flush = () => {
       rafPending = false;
-      setStreamText(acc);
+      setStreamText(st.acc);
     };
     const scheduleRender = () => {
       if (!rafPending) {
@@ -886,10 +982,9 @@ export default function Home() {
         requestAnimationFrame(flush);
       }
     };
-
     for (;;) {
       const { done: fin, value } = await reader.read();
-      if (fin) break;
+      if (fin) return "ended";
       buf += dec.decode(value, { stream: true });
       let sep: number;
       while ((sep = buf.indexOf("\n\n")) >= 0) {
@@ -901,61 +996,86 @@ export default function Home() {
           if (line.startsWith("event:")) ev = line.slice(6).trim();
           else if (line.startsWith("data:")) data += line.slice(5).trim();
         }
-        if (!data) continue;
-        let obj: { stage?: string; text?: string; error?: string; coverage?: Coverage; cost_usd?: number } & Partial<Source>;
+        if (!data) continue; // keep-alive comment
+        let obj: { id?: string; stage?: string; text?: string; error?: string; coverage?: Coverage; cost_usd?: number } & Partial<Source>;
         try {
           obj = JSON.parse(data);
         } catch {
           continue;
         }
+        if (ev === "job") {
+          // not one of the answer's own events (so not counted): the id to reconnect with
+          st.jobId = obj.id || null;
+          if (st.jobId && user) savePending({ id: st.jobId, q: st.text, uid: user.uid, t: Date.now() });
+          continue;
+        }
+        st.seen++;
         if (ev === "status") {
           setStage(STAGE_IDX[obj.stage ?? ""] ?? 1);
         } else if (ev === "delta") {
-          if (!gotDelta) setStatus("streaming");
-          gotDelta = true;
-          acc += obj.text || "";
+          if (!st.gotDelta) setStatus("streaming");
+          st.gotDelta = true;
+          st.acc += obj.text || "";
           scheduleRender();
         } else if (ev === "source") {
-          // the brain now streams sources after the answer; collect them and show them once it's done
-          srcs.push(obj as Source);
+          // the brain streams sources after the answer; collect them and show them once it's done
+          st.srcs.push(obj as Source);
         } else if (ev === "empty") {
-          setResult({ q: text, empty: true, answer: null, sources: [], coverage: EMPTY_COV });
+          clearPending();
+          setResult({ q: st.text, empty: true, answer: null, sources: [], coverage: EMPTY_COV });
           setStatus("done");
           setLive(false);
-          return;
+          return "terminal";
         } else if (ev === "done") {
-          done = { coverage: obj.coverage || EMPTY_COV, cost_usd: obj.cost_usd };
+          clearPending();
+          finishAnswer(st, obj.coverage || EMPTY_COV, obj.cost_usd);
+          return "terminal";
         } else if (ev === "error") {
-          if (gotDelta) {
-            // answer already started showing — surface the error rather than silently re-running
-            setError(obj.error || t("err.generic"));
-            setStatus("error");
-            setLive(false);
-            return;
-          }
-          throw new Error(obj.error || "stream error");
+          // the answer itself failed (e.g. no Claude credit): show it, never re-run and re-charge
+          clearPending();
+          setError(obj.error || t("err.generic"));
+          setStatus("error");
+          setLive(false);
+          return "terminal";
         }
       }
     }
-    if (done) {
-      setResult({ q: text, empty: false, answer: acc, sources: srcs, coverage: done.coverage, cost_usd: done.cost_usd });
-      setStatus("done");
-      setLive(false);
-      setCurrentChatId(null);
-      saveChat(text, acc, srcs, done.coverage, done.cost_usd);
-      return;
-    }
-    if (gotDelta) {
-      // stream ended mid-answer: keep what we have, with whatever evidences arrived
-      setResult({ q: text, empty: false, answer: acc, sources: srcs, coverage: EMPTY_COV });
-      setStatus("done");
-      setLive(false);
-      setCurrentChatId(null);
-      saveChat(text, acc, srcs, EMPTY_COV);
-      return;
-    }
-    throw new Error("no data"); // nothing arrived — let ask() fall back
   }
+
+  function finishAnswer(st: StreamState, coverage: Coverage, cost?: number) {
+    setResult({ q: st.text, empty: false, answer: st.acc, sources: st.srcs, coverage, cost_usd: cost });
+    setStatus("done");
+    setLive(false);
+    setCurrentChatId(null);
+    saveChat(st.text, st.acc, st.srcs, coverage, cost);
+  }
+
+  // An answer still being written when the page was closed or reloaded (a phone does this to
+  // background tabs): pick it back up once, on load, if it's from the last 25 minutes.
+  const resumed = useRef(false);
+  useEffect(() => {
+    if (!user || resumed.current) return;
+    resumed.current = true;
+    const p = readPending();
+    if (!p || p.uid !== user.uid || Date.now() - p.t > 25 * 60 * 1000 || status !== "idle") {
+      if (p) clearPending();
+      return;
+    }
+    setAsked(p.q);
+    setAnswerStyle(style);
+    setStatus("loading");
+    setStage(0);
+    setStreamText("");
+    setResult(null);
+    setError("");
+    setLive(true);
+    followAnswer({ text: p.q, acc: "", srcs: [], gotDelta: false, seen: 0, jobId: p.id }, null).catch(() => {
+      setError(t("err.interrupted"));
+      setStatus("error");
+      setLive(false);
+    });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [user]);
 
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
