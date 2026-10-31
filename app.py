@@ -1495,17 +1495,23 @@ def raw_ids(ch):
     return {f.stem for f in raw.glob("*.json")} if raw.exists() else set()
 
 
-def untagged_ids(ch, retag_old=False):
+def untagged_ids(ch, rt=None):
     """Downloaded videos that still need tagging. Compares file names (raw/ vs tags/), which takes a
     fraction of a second across the whole archive; opening every transcript to check took minutes.
-    Only the retag_old pass reads tag files, to see which carry an older tag_version."""
+    rt: a queued re-tag (retag_rule) adds the already-tagged videos it covers."""
     tags = cpaths(ch)["tags"]
     have = {f.stem for f in tags.glob("*.json")} if tags.exists() else set()
     ids = raw_ids(ch)
     out = ids - have
-    if retag_old:
-        out |= {vid for vid in ids & have if tag_version(ch, vid) < TAG_VERSION}
+    if rt:
+        out |= {vid for vid in ids & have if needs_tag(ch, vid, rt)}
     return out
+
+
+def video_word_counts(ch):
+    """{video id: words} from the channel's last build, to price tagging without opening transcripts."""
+    return {v.get("videoId"): int(v.get("words") or 0) for v in read_list(cpaths(ch)["data"] / "videos.json")
+            if isinstance(v, dict) and v.get("videoId")}
 
 
 def load_videos(ch, only=None):
@@ -1948,26 +1954,75 @@ def recover_tag_batches(anth, model, channels):
     return total
 
 
+TAGVER_PATH = OUTPUT / ".tag_versions.json"
+_TAGVER = {"map": None, "dirty": False}  # "slug/vid" -> [mtime_ns, size, version], saved between runs
+_TAGVER_LOCK = Lock()
+
+
 def tag_version(ch, vid):
-    """0 = not tagged, 1 = old method (no version stored), 2+ = current method."""
+    """0 = not tagged, 1 = old method (no version stored), 2+ = current method. Remembered per tag file
+    (keyed by its size and time), so asking about all 27k videos opens each file once ever, not once
+    per question."""
     f = cpaths(ch)["tags"] / f"{vid}.json"
-    if not f.exists():
+    try:
+        st = f.stat()
+    except OSError:
         return 0
+    key = f"{ch['slug']}/{vid}"
+    with _TAGVER_LOCK:
+        if _TAGVER["map"] is None:
+            _TAGVER["map"] = read_obj(TAGVER_PATH)
+        hit = _TAGVER["map"].get(key)
+    if isinstance(hit, list) and len(hit) == 3 and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+        return int(hit[2])
     d = read_json(f, {})
-    return int((d if isinstance(d, dict) else {}).get("tag_version") or 1)
+    ver = int((d if isinstance(d, dict) else {}).get("tag_version") or 1)
+    with _TAGVER_LOCK:
+        _TAGVER["map"][key] = [st.st_mtime_ns, st.st_size, ver]
+        _TAGVER["dirty"] = True
+    return ver
 
 
-def needs_tag(ch, vid, retag_old=False):
-    v = tag_version(ch, vid)
-    return v == 0 or (retag_old and v < TAG_VERSION)
+def save_tag_versions():
+    with _TAGVER_LOCK:
+        if not _TAGVER["dirty"] or _TAGVER["map"] is None:
+            return
+        snap = dict(_TAGVER["map"])
+        _TAGVER["dirty"] = False
+    write_json(TAGVER_PATH, snap)
+
+
+def retag_rule(settings):
+    """The re-tag queued from the menu (r), or None. {"mode": "old"} redoes videos tagged with an older
+    method; {"mode": "all", "since": t} redoes every video whose tags were saved before t - so it
+    survives being stopped and picks up where it left off, and finishes by itself once every tag file
+    is newer than t. The old Settings flag (retag_old) still counts as "old"."""
+    rt = settings.get("retag")
+    if isinstance(rt, dict) and rt.get("mode") in ("old", "all"):
+        return rt
+    return {"mode": "old"} if settings.get("retag_old") else None
+
+
+def needs_tag(ch, vid, rt=None):
+    """True if the video has no tags yet, or the queued re-tag (see retag_rule) covers it."""
+    f = cpaths(ch)["tags"] / f"{vid}.json"
+    try:
+        st = f.stat()
+    except OSError:
+        return True
+    if not rt:
+        return False
+    if rt.get("mode") == "all":
+        return st.st_mtime < float(rt.get("since") or 0)
+    return tag_version(ch, vid) < TAG_VERSION
 
 
 class Tagger:
     """Tagging conveyor belt: videos are tagged in background threads as soon as they're available,
     while downloads keep going."""
 
-    def __init__(self, client, model, workers, retag_old=False):
-        self.client, self.model, self.retag_old = client, model, retag_old
+    def __init__(self, client, model, workers, retag=None):
+        self.client, self.model, self.retag = client, model, retag  # retag: retag_rule(settings)
         self.ex = ThreadPoolExecutor(max_workers=max(1, workers))
         self.lock = Lock()
         self.futs = []
@@ -1983,7 +2038,7 @@ class Tagger:
 
     def submit(self, ch, v):
         key = (ch["slug"], v["videoId"])
-        if self.out_of_credit or key in self.seen or not needs_tag(ch, v["videoId"], self.retag_old):
+        if self.out_of_credit or key in self.seen or not needs_tag(ch, v["videoId"], self.retag):
             return
         self.seen.add(key)
         if self.left is not None:
@@ -2063,9 +2118,9 @@ class BatchPump:
     call) runs off the download loop, so downloads never stall. Submitted batches are persisted and
     collected at the end (or next run if this one is interrupted). About half price, like all batching."""
 
-    def __init__(self, anth, model, channels, chunk=500, retag_old=False):
+    def __init__(self, anth, model, channels, chunk=500, retag=None):
         self.anth, self.model, self.channels = anth, model, channels
-        self.chunk, self.retag_old = chunk, retag_old
+        self.chunk, self.retag = chunk, retag  # retag: retag_rule(settings)
         self.q = Queue()           # (ch, vid) waiting to be submitted
         self.recs = []             # submitted batch records (guarded by lock)
         self.seen = set()          # (slug, vid) already queued (download thread only)
@@ -2081,7 +2136,7 @@ class BatchPump:
 
     def _enqueue(self, ch, vid):
         key = (ch["slug"], vid)
-        if self.out_of_credit or key in self.seen or not needs_tag(ch, vid, self.retag_old):
+        if self.out_of_credit or key in self.seen or not needs_tag(ch, vid, self.retag):
             return
         self.seen.add(key)
         self.q.put((ch, vid))
@@ -2093,13 +2148,8 @@ class BatchPump:
     def submit_pre_existing(self):
         """Queue already-downloaded-but-untagged videos (belt-first), cheaply by listing files."""
         for ch in self.channels:
-            raw, tags = cpaths(ch)["raw"], cpaths(ch)["tags"]
-            if not raw.exists():
-                continue
-            have = {f.stem for f in tags.glob("*.json")} if tags.exists() else set()
-            for f in raw.glob("*.json"):
-                if self.retag_old or f.stem not in have:
-                    self._enqueue(ch, f.stem)
+            for vid in sorted(untagged_ids(ch, self.retag)):
+                self._enqueue(ch, vid)
 
     def _run(self):
         batch = []
@@ -2440,26 +2490,42 @@ fc.textContent=q?(n+' of '+segs.length+' moments'):'';});
     return html_page(v.get("title") or vid, "".join(parts), depth=1)
 
 
-def _mapping_sig(mapping):
+def _tag_labels(path):
+    """The raw topic labels in one tag file, normalised the way clean_tags does."""
+    d = read_obj(path)
+    return sorted({str(t.get("topic") or "").strip().lower() for t in d.get("topics") or []
+                   if isinstance(t, dict) and str(t.get("topic") or "").strip()})
+
+
+def _video_sigs(ch, mapping, label_cache=None):
+    """Per-video fingerprint: raw transcript + tags + channel name + how the topic map translates THIS
+    video's own labels. If it is unchanged, the video is reused from the last build instead of
+    recomputed. Only the video's own labels count: a new label added to the map for some other video
+    can't change this one's pages (the map never re-files existing labels), so it no longer forces a
+    rebuild of the whole archive. label_cache {vid: [tag stat, labels]} is the last build's record of
+    each video's labels, so a tag file is only opened again when it changed.
+    Returns (sigs, label_cache for this build)."""
     import hashlib
-    return hashlib.md5(json.dumps(mapping, sort_keys=True, ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
-
-
-def _video_sigs(ch, mapping):
-    """Per-video fingerprint: raw transcript + tags + topic mapping + channel name. If a video's
-    fingerprint is unchanged, it can be reused from the last build instead of recomputed."""
     p = cpaths(ch)
-    mp = _mapping_sig(mapping)
     nm = full_name(ch)
-    sigs = {}
+    old = label_cache if isinstance(label_cache, dict) else {}
+    sigs, labels = {}, {}
     for f in sorted(p["raw"].glob("*.json")):
         vid = f.stem
         st = f.stat()
         t = p["tags"] / f"{vid}.json"
-        tst = t.stat() if t.exists() else None
-        sigs[vid] = "%s:%d:%d:%d:%d:%s" % (mp, st.st_mtime_ns, st.st_size,
-                                           tst.st_mtime_ns if tst else 0, tst.st_size if tst else 0, nm)
-    return sigs
+        try:
+            tst = t.stat()
+        except OSError:
+            tst = None
+        tkey = f"{tst.st_mtime_ns}:{tst.st_size}" if tst else "-"
+        hit = old.get(vid)
+        labs = hit[1] if isinstance(hit, list) and len(hit) == 2 and hit[0] == tkey else (_tag_labels(t) if tst else [])
+        labels[vid] = [tkey, labs]
+        mp = hashlib.md5(json.dumps([[lb, mapping.get(lb, lb)] for lb in labs],
+                                    ensure_ascii=False).encode("utf-8")).hexdigest()[:12]
+        sigs[vid] = "%s:%d:%d:%s:%s" % (mp, st.st_mtime_ns, st.st_size, tkey, nm)
+    return sigs, labels
 
 
 def _grouped_chunks(path):
@@ -2599,13 +2665,15 @@ def build_channel(ch, mapping, progress=None):
     for k in ("read", "topics", "nlm", "data"):
         p[k].mkdir(parents=True, exist_ok=True)
     name = full_name(ch)
-    cur_sig = _video_sigs(ch, mapping)
     state = read_obj(p["base"] / ".build_state.json")
+    cur_sig, labels = _video_sigs(ch, mapping, state.get("labels"))
     prev_sig = state.get("vids") if isinstance(state.get("vids"), dict) else {}
     outputs_ok = (p["data"] / "chunks.jsonl").exists() and (p["data"] / "videos.json").exists()
 
     # whole channel unchanged: reuse its outputs as-is, no rewrite
     if outputs_ok and prev_sig and cur_sig == prev_sig:
+        if state.get("labels") != labels:  # only tag-file stats were re-read; keep the record current
+            write_json(p["base"] / ".build_state.json", {**state, "labels": labels})
         vj = read_list(p["data"] / "videos.json")
         if progress:
             for _ in vj:
@@ -2669,7 +2737,7 @@ def build_channel(ch, mapping, progress=None):
         write_csv(p["data"] / "videos.csv", rows)
     write_json(p["data"] / "videos.json", video_json)
     write_json(p["data"] / "topics.json", dict(sorted(topic_map.items(), key=lambda kv: -len(kv[1]))))
-    write_json(p["base"] / ".build_state.json", {"vids": cur_sig, "n_chunks": n_chunks})
+    write_json(p["base"] / ".build_state.json", {"vids": cur_sig, "n_chunks": n_chunks, "labels": labels})
     return {"rows": rows, "videos": video_json, "n_chunks": n_chunks, "topics": topic_map, "changed": True}
 
 
@@ -3338,7 +3406,7 @@ def _update(settings, unattended, only=None):
     confirm = (lambda q: True) if unattended else yes
     all_ch = settings["channels"]       # files, search and stats are always rebuilt for every channel
     channels = only or all_ch           # ... but only these are listed, downloaded and tagged this run
-    retag = bool(settings.get("retag_old"))
+    retag = retag_rule(settings)        # a re-tag queued from the menu (r), or None
     if not channels:
         warn("No channels yet. Add one from the menu first.")
         return
@@ -3399,9 +3467,12 @@ def _update(settings, unattended, only=None):
         for ch in channels:
             todo = pending_transcripts(ch)
             todo_by[ch["slug"]] = todo
-            # only the untagged transcripts are opened (to size the Claude bill); the rest are skipped by name
-            untagged = load_videos(ch, only=untagged_ids(ch, retag))
-            words = sum(video_words(v) for v in untagged)
+            # size the Claude bill from the last build's word counts; only transcripts it hasn't seen yet
+            # are opened (a full re-tag would otherwise open all 27k)
+            untagged = untagged_ids(ch, retag)
+            wc = video_word_counts(ch)
+            words = sum(wc[vid] for vid in untagged if vid in wc)
+            words += sum(video_words(v) for v in load_videos(ch, only={vid for vid in untagged if vid not in wc}))
             words += sum((v.get("durationSeconds") or 1200) / 60 * 150 for v in todo)
             p = PRICES.get(tag_model, (1.0, 5.0))
             tag_usd = words * 1.4 / 1e6 * p[0] + (len(untagged) + len(todo)) * 600 / 1e6 * p[1]
@@ -3416,10 +3487,13 @@ def _update(settings, unattended, only=None):
             any_work = any_work or bool(todo or untagged)
         for r in plan_rows:
             say(r)
+        if retag:
+            say(f"  {C}Includes the re-tag you queued ({'every video' if retag['mode'] == 'all' else 'videos tagged the old way'})."
+                f" Already re-tagged videos are skipped.{X}")
         est_tr = total_tr * EST_TRANSCRIPT
         tag_mode = settings.get("tag_mode", "auto")
         est_batch = (any_work and tag_mode != "live" and
-                     (tag_mode == "batch" or settings.get("retag_old") or
+                     (tag_mode == "batch" or retag or
                       total_tr + total_untagged >= BATCH_TAG_THRESHOLD))
         claude_est = total_tag_usd * 0.5 if est_batch else total_tag_usd
         batch_note = " (batch rate, about half price)" if est_batch else ""
@@ -3476,11 +3550,11 @@ def _update(settings, unattended, only=None):
     mode = settings.get("tag_mode", "auto")
     use_batch = (any_work and anth is not None and
                  (mode == "batch" or (mode != "live" and
-                  (pipeline or settings.get("retag_old") or total_tr + _untagged_estimate() >= BATCH_TAG_THRESHOLD))))
+                  (pipeline or retag or total_tr + _untagged_estimate() >= BATCH_TAG_THRESHOLD))))
 
     tagger = pump = None
     if any_work and anth is not None and not use_batch:
-        tagger = Tagger(anth, tag_model, int(settings.get("tag_workers") or TAG_WORKERS), retag_old=retag)
+        tagger = Tagger(anth, tag_model, int(settings.get("tag_workers") or TAG_WORKERS), retag=retag)
         live["tagger"] = tagger
         for ch in channels:  # anything already downloaded but not tagged goes on the belt first
             tagger.submit_ids(ch, sorted(untagged_ids(ch, retag)))
@@ -3489,7 +3563,7 @@ def _update(settings, unattended, only=None):
             say(f"  {plural(tagger.submitted, 'video')} queued, tagging in the background "
                 f"{int(settings.get('tag_workers') or TAG_WORKERS)} at a time. Progress shows on the lines below.")
     elif use_batch:
-        pump = BatchPump(anth, tag_model, channels, retag_old=retag)
+        pump = BatchPump(anth, tag_model, channels, retag=retag)
         pump.submit_pre_existing()  # queue already-downloaded-but-untagged videos (belt-first, in the background)
         head("Batch tagging with Claude (about half price)")
         say("  Videos go to Claude's batch service in rolling chunks as they download, so tagging runs in\n"
@@ -3575,11 +3649,19 @@ def _update(settings, unattended, only=None):
     build_and_index(mapping, "Files and search index")
 
     def finish_retag():
-        # videos tagged with an older method = those untagged_ids flags only when retag_old is on
-        if retag and not any(untagged_ids(ch, True) - untagged_ids(ch) for ch in all_ch):
+        # the re-tag is done once no already-tagged video is still covered by it (a video that has never
+        # been tagged is ordinary backlog, not part of the re-tag); until then it stays queued and the
+        # next Update carries on from where this one stopped
+        save_tag_versions()
+        if retag and not any(untagged_ids(ch, retag) - untagged_ids(ch) for ch in all_ch):
+            settings.pop("retag", None)
             settings["retag_old"] = False
             save_settings(settings)
-            ok("All videos are now tagged with the latest method.")
+            ok("Re-tag finished: every video now has fresh tags." if retag["mode"] == "all"
+               else "All videos are now tagged with the latest method.")
+        elif retag:
+            left_n = sum(len(untagged_ids(ch, retag) - untagged_ids(ch)) for ch in all_ch)
+            warn(f"  Re-tag: {plural(left_n, 'video')} still to redo. The next Update or Overnight carries on.")
 
     if use_batch:
         if pump.seen:
@@ -3587,7 +3669,10 @@ def _update(settings, unattended, only=None):
             say("  Collecting the tag batches that processed in the background during download...")
         done, failed, busd = pump.collect()  # drains the worker (final partial batch) then collects all
         ooc = pump.out_of_credit
-        leftover = tag_backlog() if not ooc else []  # stragglers (load failures etc.): one final batch
+        cap = budget_left("claude")
+        # stragglers (load failures etc.): one final batch - unless the run's Claude budget is spent,
+        # in which case loading them (all of a big re-tag's remainder) would be for nothing
+        leftover = tag_backlog() if not ooc and (cap is None or cap > 0.05) else []
         if leftover:
             if not pump.seen:
                 head("Batch tagging with Claude (about half price)")
@@ -3668,7 +3753,8 @@ def time_estimate(settings, channels, todo_by=None):
     workers = max(1, int(settings.get("tag_workers") or TAG_WORKERS))
     todo_by = todo_by or {ch["slug"]: pending_transcripts(ch) for ch in channels}
     todo = [v for ch in channels for v in todo_by.get(ch["slug"], [])]
-    n_tag = sum(len(untagged_ids(ch, bool(settings.get("retag_old")))) for ch in channels)
+    rt = retag_rule(settings)
+    n_tag = sum(len(untagged_ids(ch, rt)) for ch in channels)
     n_tag += len(todo)
     sem = [ch for ch in channels if ch.get("search") != "keyword"]
     new_chunks = sum((v.get("durationSeconds") or 1200) / 60 for ch in sem for v in todo_by.get(ch["slug"], [])) \
@@ -3677,7 +3763,7 @@ def time_estimate(settings, channels, todo_by=None):
     ix = new_chunks / get_perf("index_chunks_per_sec", 20.0)
     tag_mode = settings.get("tag_mode", "auto")
     est_batch = bool(n_tag) and tag_mode != "live" and (
-        tag_mode == "batch" or settings.get("retag_old") or n_tag >= BATCH_TAG_THRESHOLD)
+        tag_mode == "batch" or rt or n_tag >= BATCH_TAG_THRESHOLD)
     m = lambda x: f"{x / 60:.0f} min" if x >= 60 else "<1 min"  # noqa: E731
     parts = []
     if dl:
@@ -4980,10 +5066,8 @@ def settings_menu(settings):
             (4, f"Model for answers: {settings['answer_model']}"),
             (5, f"Parallel tagging: {settings.get('tag_workers', 4)} videos at a time"),
             (6, "Edit API keys (.env)"),
-            (7, "Re-tag older videos with the latest tagging method"
-                + (f" {Y}(queued for next update){X}" if settings.get("retag_old") else "")),
-            (8, f"Fast indexing (all CPU cores): {'on' if settings.get('fast_indexing', True) else 'off'}"),
-            (9, f"Tagging method: {settings.get('tag_mode', 'auto')}"),
+            (7, f"Fast indexing (all CPU cores): {'on' if settings.get('fast_indexing', True) else 'off'}"),
+            (8, f"Tagging method: {settings.get('tag_mode', 'auto')}"),
         ], allow_blank=True)
         if not k:
             return
@@ -5011,13 +5095,11 @@ def settings_menu(settings):
             open_path(ROOT / ".env", notepad=True)
             warn("Restart the app after saving .env so the new keys are loaded.")
         elif k == "7":
-            set_retag(settings)
-        elif k == "8":
             settings["fast_indexing"] = not settings.get("fast_indexing", True)
             say("Fast indexing spreads the search indexing over all CPU cores. Turn it off only if indexing "
                 "errors out or makes your PC unusable while it runs.")
             ok(f"Fast indexing is now {'on' if settings['fast_indexing'] else 'off'}.")
-        elif k == "9":
+        elif k == "8":
             say("How videos get tagged by Claude:\n"
                 "  auto  - big runs use Claude's batch service (about half price); small runs tag live. Recommended.\n"
                 "  live  - tag during download, results appear right away, full price.\n"
@@ -5028,27 +5110,73 @@ def settings_menu(settings):
         save_settings(settings)
 
 
-def set_retag(settings):
-    old, words = 0, 0
-    for ch in settings["channels"]:
-        for v in load_videos(ch):
-            if 0 < tag_version(ch, v["videoId"]) < TAG_VERSION:
-                old += 1
-                words += video_words(v)
-    if not old:
-        ok("Every video is already tagged with the latest method.")
-        settings["retag_old"] = False
-        return
+def _retag_cost(settings, ids_by_ch):
+    """Estimated Claude cost (batch rate) of re-tagging these videos, from the last build's word counts."""
     p = PRICES.get(settings["tag_model"], (1.0, 5.0))
-    est = words * 1.4 / 1e6 * p[0] + old * 800 / 1e6 * p[1]
-    say(f"\n{plural(old, 'video')} were tagged with the older method. Re-tagging them makes every summary, "
-        f"topic and key claim consistent.\nEstimated cost: {money(est)} Claude. "
-        f"Old tags stay in place until each new one is saved, so nothing goes missing midway.")
-    if yes("Re-tag them on the next update?"):
-        settings["retag_old"] = True
-        ok("Queued. Run Update (1 or 2) to do it.")
+    words = n = 0
+    for ch in settings["channels"]:
+        ids = ids_by_ch.get(ch["slug"]) or set()
+        if not ids:
+            continue
+        wc = video_word_counts(ch)
+        words += sum(wc.get(vid, 0) for vid in ids)
+        n += len(ids)
+    return (words * 1.4 / 1e6 * p[0] + n * 800 / 1e6 * p[1]) * 0.5
+
+
+def retag_menu(settings):
+    """Main-menu r: redo Claude's summaries, topics and key claims. Queues the re-tag; it then runs as
+    part of Update / Overnight (batch rate, under their spend checks), carries on across runs if it is
+    stopped or a budget runs out, and clears itself when every video is done."""
+    head("Re-tag videos with Claude")
+    chans = settings["channels"]
+    rt = retag_rule(settings)
+    if rt:
+        left = {ch["slug"]: untagged_ids(ch, rt) - untagged_ids(ch) for ch in chans}
+        n_left = sum(len(v) for v in left.values())
+        what = "every video" if rt["mode"] == "all" else "videos tagged with the older method"
+        say(f"A re-tag of {what} is queued: {n_left:,} video{'s' if n_left != 1 else ''} still to redo "
+            f"(about {money(_retag_cost(settings, left))} Claude).")
+        k = choose("Pick (Enter to go back)", [(1, "Run it now (Update)"), (2, "Cancel the queued re-tag")],
+                   allow_blank=True)
+        if k == "1":
+            update(settings)
+        elif k == "2":
+            settings.pop("retag", None)
+            settings["retag_old"] = False
+            save_settings(settings)
+            ok("Cancelled. Videos already re-tagged keep their new tags.")
+        save_tag_versions()
+        return
+    say("Claude re-reads each transcript and writes a fresh summary, topics and key claims. The old tags stay\n"
+        "in place until each new one is saved, so nothing goes missing midway, and it runs at batch rate\n"
+        "(about half price). Stop it any time: the next Update carries on where it stopped.")
+    status("  counting videos tagged with the older method (first time takes a few minutes)...")
+    old = {ch["slug"]: untagged_ids(ch, {"mode": "old"}) - untagged_ids(ch) for ch in chans}
+    status_done()
+    save_tag_versions()
+    every = {ch["slug"]: raw_ids(ch) - untagged_ids(ch) for ch in chans}
+    n_old, n_all = sum(len(v) for v in old.values()), sum(len(v) for v in every.values())
+    opts = []
+    if n_old:
+        opts.append((1, f"Only videos tagged with the older method: {n_old:,} (about {money(_retag_cost(settings, old))})"))
+    opts.append((2, f"Every video: {n_all:,} (about {money(_retag_cost(settings, every))})"))
+    k = choose("Pick (Enter to go back)", opts, allow_blank=True)
+    if not k:
+        return
+    if k == "1":
+        settings["retag"] = {"mode": "old"}
     else:
-        settings["retag_old"] = False
+        if not yes(f"Re-tag all {n_all:,} videos for about {money(_retag_cost(settings, every))} of Claude credit?"):
+            return
+        settings["retag"] = {"mode": "all", "since": time.time()}
+    save_settings(settings)
+    ok("Queued.")
+    say("Run it now with Update (asks before spending), or later with Overnight to cap the spend.\n"
+        "Either way it continues across runs until every video is done.")
+    k = choose("Now", [(1, "Run Update now"), (2, "Later")])
+    if k == "1":
+        update(settings)
 
 
 def set_tag_workers(settings):
@@ -5418,6 +5546,8 @@ def menu():
             (9, "Open the output folder"),
             ("p", "Publish data for the website (after adding channels)"),
             ("d", "Find duplicate / excerpt videos"),
+            ("r", "Re-tag videos with Claude (redo summaries, topics, key claims)"
+                  + (f" {Y}(queued){X}" if retag_rule(settings) else "")),
             (0, "Exit"),
         ])
         try:
@@ -5446,7 +5576,9 @@ def menu():
                 publish_data(settings)
             elif k == "d":
                 duplicates_menu(settings)
-            if k in ("1", "2", "3", "8", "p", "d"):
+            elif k == "r":
+                retag_menu(settings)
+            if k in ("1", "2", "3", "8", "p", "d", "r"):
                 pause()
         except KeyboardInterrupt:
             warn("\nStopped. Anything finished so far is saved.")
