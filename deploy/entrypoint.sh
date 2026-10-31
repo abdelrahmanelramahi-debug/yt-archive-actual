@@ -25,6 +25,12 @@ if [ -n "$DATA_ARCHIVE_URL" ] && [ "$want" != "$have" ]; then
   echo "[entrypoint] data archive changed (or first boot) - downloading ..."
   if curl -fL --retry 3 "$DATA_ARCHIVE_URL" -o /tmp/archive.tar.gz; then
     echo "[entrypoint] extracting ..."
+    # The volume only has room for ONE copy of the data, so clear the previous channel directories
+    # first - extracting on top of them (plus channels since removed, plus any half-written leftovers)
+    # overflowed it. Top-level files such as the spend ledger are kept; every directory here came
+    # from a previous archive. The stamp goes too, so a failed extract is retried on the next start.
+    find output -mindepth 1 -maxdepth 1 -type d -exec rm -rf {} +
+    rm -f "$STAMP"
     tar -xzf /tmp/archive.tar.gz -C output
     rm -f /tmp/archive.tar.gz
     printf '%s' "$want" > "$STAMP"

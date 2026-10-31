@@ -4983,7 +4983,11 @@ def publish_data(settings):
             if not p["search"].exists() or not chunks.exists():
                 missing.append(channel_label(ch))
                 continue
-            tar.add(chunks, arcname=f"{ch['slug']}/data/chunks.jsonl")
+            # Keyword channels are served from search/keyword.db alone - the brain never reads their
+            # chunks.jsonl (only the local index build does) - so leave it out: it's ~1/4 of the
+            # archive and pushed the extracted data past Railway's volume.
+            if ch.get("search") != "keyword":
+                tar.add(chunks, arcname=f"{ch['slug']}/data/chunks.jsonl")
             tar.add(p["search"], arcname=f"{ch['slug']}/search")
             added += 1
             say(f"  + {channel_label(ch)}")
