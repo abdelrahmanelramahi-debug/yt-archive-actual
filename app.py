@@ -614,10 +614,22 @@ def keep_awake(on):
         pass
 
 
+_BALANCE = {"at": 0.0, "value": None}  # the last answer, reused for a minute (several steps ask in a row)
+
+
 def apify_balance():
     token = need_key("APIFY_TOKEN")
     if not token:
         return None
+    if _BALANCE["value"] is not None and time.time() - _BALANCE["at"] < 60:
+        return _BALANCE["value"]
+    b = _apify_balance(token)
+    if b is not None:
+        _BALANCE.update(at=time.time(), value=b)
+    return b
+
+
+def _apify_balance(token):
     try:
         req = urllib.request.Request("https://api.apify.com/v2/users/me/limits",
                                      headers={"Authorization": f"Bearer {token}"})
@@ -762,10 +774,18 @@ YTDLP_MAX_AGE_DAYS = 45
 FREE_LIST = {}
 
 
+_FREE_LIST_LOCK = Lock()  # channels are listed in parallel; only one of them should run the update
+
+
 def ensure_ytdlp():
     """Channel lists come free from yt-dlp on this PC. YouTube changes often, so keep it fresh."""
-    if "ok" in FREE_LIST:
-        return FREE_LIST["ok"]
+    with _FREE_LIST_LOCK:
+        if "ok" not in FREE_LIST:
+            _ensure_ytdlp()
+    return FREE_LIST["ok"]
+
+
+def _ensure_ytdlp():
     try:
         from importlib.metadata import version
         v = version("yt-dlp")
@@ -785,7 +805,6 @@ def ensure_ytdlp():
         FREE_LIST["ok"] = True
     except Exception:
         FREE_LIST["ok"] = False
-    return FREE_LIST["ok"]
 
 
 def free_list_tab(ch, tab, limit, label):
@@ -1470,10 +1489,35 @@ def download_many(client, jobs, on_saved=None, status_fn=None, feed=None):
 
 # ---------------------------------------------------------------- videos & chunks
 
-def load_videos(ch):
+def raw_ids(ch):
+    """Video ids with a downloaded transcript, from file names alone (no file is opened)."""
+    raw = cpaths(ch)["raw"]
+    return {f.stem for f in raw.glob("*.json")} if raw.exists() else set()
+
+
+def untagged_ids(ch, retag_old=False):
+    """Downloaded videos that still need tagging. Compares file names (raw/ vs tags/), which takes a
+    fraction of a second across the whole archive; opening every transcript to check took minutes.
+    Only the retag_old pass reads tag files, to see which carry an older tag_version."""
+    tags = cpaths(ch)["tags"]
+    have = {f.stem for f in tags.glob("*.json")} if tags.exists() else set()
+    ids = raw_ids(ch)
+    out = ids - have
+    if retag_old:
+        out |= {vid for vid in ids & have if tag_version(ch, vid) < TAG_VERSION}
+    return out
+
+
+def load_videos(ch, only=None):
+    """Parsed transcripts, newest first. only: a set of video ids to load instead of the whole
+    channel (loading a big channel takes the better part of a minute)."""
     p = cpaths(ch)
     vids = []
-    for f in sorted(p["raw"].glob("*.json")):
+    if only is not None:
+        files = sorted(p["raw"] / f"{vid}.json" for vid in only)
+    else:
+        files = sorted(p["raw"].glob("*.json"))
+    for f in files:
         v = read_json(f)
         if not isinstance(v, dict) or not v.get("segments"):
             continue
@@ -2568,7 +2612,7 @@ def build_channel(ch, mapping, progress=None):
                 progress()
         return {"rows": read_csv_rows(p["data"] / "videos.csv"), "videos": vj,
                 "n_chunks": int(state.get("n_chunks") or 0),
-                "topics": read_obj(p["data"] / "topics.json")}
+                "topics": read_obj(p["data"] / "topics.json"), "changed": False}
 
     # load the previous build's outputs so unchanged videos can be reused without re-parsing
     old_vj, old_rows, old_chunks = {}, {}, {}
@@ -2626,7 +2670,7 @@ def build_channel(ch, mapping, progress=None):
     write_json(p["data"] / "videos.json", video_json)
     write_json(p["data"] / "topics.json", dict(sorted(topic_map.items(), key=lambda kv: -len(kv[1]))))
     write_json(p["base"] / ".build_state.json", {"vids": cur_sig, "n_chunks": n_chunks})
-    return {"rows": rows, "videos": video_json, "n_chunks": n_chunks, "topics": topic_map}
+    return {"rows": rows, "videos": video_json, "n_chunks": n_chunks, "topics": topic_map, "changed": True}
 
 
 def write_csv(path, rows):
@@ -2671,7 +2715,7 @@ def build_all(channels, mapping):
             status(f"    Building    {bar(done['n'], total, 18)}  {done['n']:,}/{total:,} videos · "
                    f"{_BUILD['written']:,} files updated, {_BUILD['skipped']:,} unchanged")
     rows, videos, topics = [], [], {}
-    counts = []
+    counts, changed = [], False
     for ch in channels:
         r = build_channel(ch, mapping, progress)
         rows += r["rows"]
@@ -2679,6 +2723,7 @@ def build_all(channels, mapping):
         for k, v in r["topics"].items():
             topics.setdefault(k, []).extend(v)
         counts.append((ch, len(r["rows"]), r["n_chunks"]))
+        changed = changed or r["changed"]
     stats = {"updated": datetime.now().isoformat(timespec="seconds"), "channels": {}, "total": {}}
     tot = {"videos": 0, "lives": 0, "shorts": 0, "seconds": 0.0, "live_seconds": 0.0, "words": 0, "tagged": 0}
     for ch, _, _ in counts:
@@ -2697,6 +2742,15 @@ def build_all(channels, mapping):
             tot[k] += st[k]
     stats["total"] = tot
     write_json(STATS_PATH, stats)
+    # The ALL/ files only combine the channel files, so when no channel changed and the set of channels
+    # is the same as last time, they are already right: skip re-stitching the 1.7 GB chunks file,
+    # the video list and the topic pages.
+    all_src = {"channels": [ch["slug"] for ch in channels]}
+    all_stamp = ALL / ".src.json"
+    if not changed and read_obj(all_stamp) == all_src and (ALL / "videos.json").exists() \
+            and (ALL / "chunks.jsonl").exists():
+        status_done()
+        return counts
     if rows:
         write_csv(ALL / "videos.csv", rows)
     write_json(ALL / "videos.json", videos)
@@ -2723,6 +2777,7 @@ def build_all(channels, mapping):
         p = cpaths(ch)
         managed += [(p["read"], "*.md"), (p["topics"], "*.md"), (p["nlm"], "*.md")]
     build_end(managed)
+    write_json(all_stamp, all_src)
     return counts
 
 
@@ -2866,7 +2921,23 @@ def embed_into(model, model_name, items, vecs, tick):
             tick()
 
 
-def save_index(p, ids, vecs, model_name):
+def index_src(ch, model_name=""):
+    """Fingerprint of what a channel's search index is built from (its chunks file, the clip nesting,
+    the model). Saved with the index; while it matches, the index is current and the chunks file
+    (hundreds of MB for a big channel) need not be read again."""
+    parts = [model_name]
+    for f in (cpaths(ch)["data"] / "chunks.jsonl", OUTPUT / "nests.json"):
+        try:
+            st = f.stat()
+            parts.append(f"{st.st_mtime_ns}:{st.st_size}")
+        except OSError:
+            parts.append("-")
+    return "|".join(parts)
+
+
+def save_index(p, ids, vecs, model_name, src=None):
+    """src: the index_src the index is now complete for; left out on mid-way checkpoints, so an
+    interrupted build is finished next time rather than taken as current."""
     import numpy as np
     keep = [i for i in ids if i in vecs]
     mat = np.array([vecs[i] for i in keep], dtype=np.float32)
@@ -2876,7 +2947,10 @@ def save_index(p, ids, vecs, model_name):
         np.save(f, mat)
     replace_file(p["search"] / "embeddings.tmp", p["search"] / "embeddings.npy")
     write_json(p["search"] / "ids.json", keep)
-    write_json(p["search"] / "meta.json", {"model": model_name, "count": len(keep)})
+    meta = {"model": model_name, "count": len(keep)}
+    if src:
+        meta["src"] = src
+    write_json(p["search"] / "meta.json", meta)
 
 
 def nested_clip_ids():
@@ -2888,6 +2962,10 @@ def index_channel(ch, model_name, status_fn=None, quiet=False):
     import numpy as np
     p = cpaths(ch)
     p["search"].mkdir(parents=True, exist_ok=True)
+    src = index_src(ch, model_name)
+    meta = read_obj(p["search"] / "meta.json")
+    if meta.get("src") == src and (p["search"] / "embeddings.npy").exists() and (p["search"] / "ids.json").exists():
+        return 0  # nothing the index depends on has changed since it was saved
     chunks = load_chunks(ch)
     clips = nested_clip_ids()
     if clips:
@@ -2895,7 +2973,6 @@ def index_channel(ch, model_name, status_fn=None, quiet=False):
     if not chunks:
         return 0
     ids = [c["chunk_id"] for c in chunks]
-    meta = read_obj(p["search"] / "meta.json")
     old_ids = read_list(p["search"] / "ids.json")
     old_model = meta.get("model") or (SEARCH_MODELS["english"] if old_ids else None)
     vecs = {}
@@ -2907,6 +2984,7 @@ def index_channel(ch, model_name, status_fn=None, quiet=False):
     vecs = {k: v for k, v in vecs.items() if k in wanted}
     new = [c for c in chunks if c["chunk_id"] not in vecs]
     if not new and old_ids == ids:
+        write_json(p["search"] / "meta.json", {**meta, "model": model_name, "count": len(ids), "src": src})
         return 0
     if new:
         model = get_embedder(model_name)
@@ -2939,7 +3017,7 @@ def index_channel(ch, model_name, status_fn=None, quiet=False):
             status_done()
         if len(new) >= 500:
             record_perf("index_chunks_per_sec", len(new) / max(time.time() - t0, 1e-6))
-    save_index(p, ids, vecs, model_name)
+    save_index(p, ids, vecs, model_name, src=src)
     return len(new)
 
 
@@ -3030,6 +3108,10 @@ def kw_index_channel(ch, status_fn=None):
     path = p["data"] / "chunks.jsonl"
     if not path.exists():
         return 0
+    src = index_src(ch)
+    stamp = p["search"] / "kw_meta.json"
+    if read_obj(stamp).get("src") == src and (p["search"] / "keyword.db").exists():
+        return 0  # chunks and nesting unchanged since the last build: the index is current
     con = kw_db(ch)
     clips = nested_clip_ids()
     have = {r[0]: r[1] for r in con.execute("SELECT chunk_id, rowid FROM info")}
@@ -3063,6 +3145,7 @@ def kw_index_channel(ch, status_fn=None):
                    f" · {i / el if el else 0:,.0f}/s{extra}")
     con.commit()
     con.close()
+    write_json(stamp, {"src": src, "count": len(current)})
     if new:
         status_done()
     return len(new)
@@ -3151,7 +3234,20 @@ class UpdateLock:
         return False
 
 
-def update(settings, unattended=False):
+def pick_scope(settings):
+    """Channels added since the last download have no transcripts yet. Offer to update just those, so
+    a fresh channel starts downloading right away instead of after a pass over everything else.
+    Returns the channels to work on, or None for all of them."""
+    new = [ch for ch in settings["channels"] if not raw_ids(ch)]
+    if not new or len(new) == len(settings["channels"]):
+        return None
+    names = ", ".join(channel_label(ch) for ch in new)
+    say("")
+    k = choose("Update", [(1, f"Just the new channel(s): {names}"), (2, "Everything")])
+    return new if k == "1" else None
+
+
+def update(settings, unattended=False, only=None):
     lock = UpdateLock()
     if not lock.__enter__():
         err("An update is already running in another window. Let it finish first "
@@ -3159,20 +3255,90 @@ def update(settings, unattended=False):
         return
     keep_awake(True)
     try:
-        _update(settings, unattended)
+        _update(settings, unattended, only)
     finally:
         keep_awake(False)
         lock.__exit__(None, None, None)
 
 
-def _update(settings, unattended):
+LIST_WORKERS = 4  # channels listed at once (the Data API and yt-dlp both cope with this fine)
+
+
+def list_channels(client, chans, plans, confirm, on_done=None, show=True):
+    """Check channels for new uploads, several at a time: one channel's listing is mostly waiting on
+    YouTube, so four in flight finish in about a quarter of the time. Worker threads stay off the
+    status line; the main thread shows one progress line and a result line per channel.
+    A paid Apify fallback is never started from a worker: the worker skips it and the channel is
+    re-listed afterwards on the main thread, where the question can be asked. on_done(ch) is called
+    as each channel finishes (channels with nothing to check are reported at once)."""
+    pending = [ch for ch in chans if plans[ch["slug"]]]
+    for ch in chans:
+        if not plans[ch["slug"]]:
+            if show:
+                say(f"  {channel_label(ch)}: checked less than 6 hours ago, skipping")
+            if on_done:
+                on_done(ch)
+    if not pending:
+        return
+    ask_later = []
+
+    def work(ch):
+        _STATUS_QUIET.on = True
+        asked = []
+
+        def defer(q):  # "list with Apify instead?" waits for the main thread
+            asked.append(q)
+            return False
+        added = fetch_listing(client, ch, plans[ch["slug"]], confirm=defer if confirm is yes else confirm)
+        return added, bool(asked)
+
+    done = 0
+    with ThreadPoolExecutor(max_workers=min(LIST_WORKERS, len(pending))) as ex:
+        futs = {ex.submit(work, ch): ch for ch in pending}
+        for f in as_completed(futs):
+            ch = futs[f]
+            done += 1
+            try:
+                added, deferred = f.result()
+            except Exception as e:
+                err(f"  {channel_label(ch)}: listing failed ({str(e)[:100]})")
+                if on_done:
+                    on_done(ch)
+                continue
+            if deferred:
+                ask_later.append(ch)
+                continue
+            ch["full_refresh"] = False
+            if show:
+                say(f"  {channel_label(ch)}: {added} new in list")
+                if done < len(pending):
+                    status(f"  checking {done}/{len(pending)} channels...")
+            if on_done:
+                on_done(ch)
+    if show:
+        status_done()
+    for ch in ask_later:  # free listing failed: the Apify question, and the listing, run here
+        try:
+            added = fetch_listing(client, ch, plans[ch["slug"]], confirm)
+            ch["full_refresh"] = False
+            if show:
+                say(f"  {channel_label(ch)}: {added} new in list")
+        except Exception as e:
+            err(f"  {channel_label(ch)}: listing failed ({str(e)[:100]})")
+        if on_done:
+            on_done(ch)
+
+
+def _update(settings, unattended, only=None):
     global PARALLEL_BATCHES, PARALLEL_CEILING
     PARALLEL_BATCHES, PARALLEL_CEILING = auto_parallel_bounds()
     FAST_INDEX["on"] = settings.get("fast_indexing", True)
     run_start, run_iso = time.time(), datetime.now().isoformat(timespec="seconds")
     before = read_obj(STATS_PATH).get("channels", {})
     confirm = (lambda q: True) if unattended else yes
-    channels = settings["channels"]
+    all_ch = settings["channels"]       # files, search and stats are always rebuilt for every channel
+    channels = only or all_ch           # ... but only these are listed, downloaded and tagged this run
+    retag = bool(settings.get("retag_old"))
     if not channels:
         warn("No channels yet. Add one from the menu first.")
         return
@@ -3181,7 +3347,7 @@ def _update(settings, unattended):
         return
     client = apify_client()
     a_line, c_line, bal = balance_line()
-    head("Update")
+    head("Update" + (f" ({len(channels)} of {len(all_ch)} channels)" if only else ""))
     say(a_line)
 
     # 1. list videos (free with yt-dlp; Apify only as a backup)
@@ -3209,13 +3375,7 @@ def _update(settings, unattended):
     pipeline = unattended  # overnight: list each channel and download it at the same time (see below)
     if not pipeline:
         say("\nChecking channels for new uploads...")
-        for ch in channels:
-            if not plans[ch["slug"]]:
-                say(f"  {channel_label(ch)}: checked less than 6 hours ago, skipping")
-            else:
-                added = fetch_listing(client, ch, plans[ch["slug"]], confirm)
-                ch["full_refresh"] = False
-                say(f"  {channel_label(ch)}: {added} new in list")
+        list_channels(client, channels, plans, confirm)
         save_settings(settings)
     for ch in channels:
         n = recover_batches(client, ch)
@@ -3225,6 +3385,7 @@ def _update(settings, unattended):
     # 2. one cost summary, one confirmation
     head("Plan")
     tag_model = settings["tag_model"]
+    todo_by = {}  # slug -> transcripts still to download (computed once; the listings are big)
     if pipeline:
         # overnight: listing isn't done yet (it runs alongside downloading), so the real totals
         # aren't known here. Spend is capped by the run budget instead of an up-front confirmation.
@@ -3237,7 +3398,9 @@ def _update(settings, unattended):
         plan_rows = []
         for ch in channels:
             todo = pending_transcripts(ch)
-            untagged = [v for v in load_videos(ch) if needs_tag(ch, v["videoId"], settings.get("retag_old"))]
+            todo_by[ch["slug"]] = todo
+            # only the untagged transcripts are opened (to size the Claude bill); the rest are skipped by name
+            untagged = load_videos(ch, only=untagged_ids(ch, retag))
             words = sum(video_words(v) for v in untagged)
             words += sum((v.get("durationSeconds") or 1200) / 60 * 150 for v in todo)
             p = PRICES.get(tag_model, (1.0, 5.0))
@@ -3262,7 +3425,7 @@ def _update(settings, unattended):
         batch_note = " (batch rate, about half price)" if est_batch else ""
         say(f"\nEstimated cost: Apify {money(est_tr)}, Claude {money(claude_est)}{batch_note}")
         if any_work:
-            say(time_estimate(settings, channels))
+            say(time_estimate(settings, channels, todo_by))
         if bal and est_tr > bal["left"]:
             warn(f"Heads up: that's more than your Apify balance ({money(bal['left'])} left). "
                  f"Apify stops runs when the balance runs out. Progress is saved, so you can continue next month or after topping up.")
@@ -3271,7 +3434,7 @@ def _update(settings, unattended):
     if anth is None:
         warn("No ANTHROPIC_API_KEY in .env: transcripts will download but tagging and Q&A are off.")
     else:
-        rec_n = recover_tag_batches(anth, tag_model, channels)
+        rec_n = recover_tag_batches(anth, tag_model, all_ch)
         if rec_n:
             ok(f"  Collected {plural(rec_n, 'tag')} from a batch that finished while the PC was off or offline.")
 
@@ -3285,10 +3448,10 @@ def _update(settings, unattended):
 
     def build_and_index(mapping, label):
         head(label)
-        counts = build_all(channels, mapping)
+        counts = build_all(all_ch, mapping)
         for ch, n, c in counts:
             say(f"  {channel_label(ch)}: {plural(n, 'transcript')}, {c:,} search chunks")
-        for ch in channels:
+        for ch in all_ch:
             try:
                 sf = (lambda: tag_status() or "tagging done") if live["tagger"] and live["tagger"].futs else None
                 n = kw_index_channel(ch, sf) if ch.get("search") == "keyword" else index_channel(ch, model_name, sf)
@@ -3303,18 +3466,10 @@ def _update(settings, unattended):
         any_work = False
 
     def tag_backlog():
-        return [(ch, v) for ch in channels for v in load_videos(ch)
-                if needs_tag(ch, v["videoId"], settings.get("retag_old"))]
+        return [(ch, v) for ch in channels for v in load_videos(ch, only=untagged_ids(ch, retag))]
 
     def _untagged_estimate():
-        n = 0
-        for ch in channels:
-            rd, td = cpaths(ch)["raw"], cpaths(ch)["tags"]
-            if not rd.exists():
-                continue
-            have = {f.stem for f in td.glob("*.json")} if td.exists() else set()
-            n += sum(1 for f in rd.glob("*.json") if f.stem not in have)
-        return n
+        return sum(len(untagged_ids(ch)) for ch in channels)
 
     # 4. start tagging in the background: a live belt, or the half-price batch service, picked by mode
     #    (batch is preferred for big jobs and overnight). Either way it runs while downloads continue.
@@ -3325,18 +3480,16 @@ def _update(settings, unattended):
 
     tagger = pump = None
     if any_work and anth is not None and not use_batch:
-        tagger = Tagger(anth, tag_model, int(settings.get("tag_workers") or TAG_WORKERS),
-                        retag_old=bool(settings.get("retag_old")))
+        tagger = Tagger(anth, tag_model, int(settings.get("tag_workers") or TAG_WORKERS), retag_old=retag)
         live["tagger"] = tagger
         for ch in channels:  # anything already downloaded but not tagged goes on the belt first
-            for v in load_videos(ch):
-                tagger.submit(ch, v)
+            tagger.submit_ids(ch, sorted(untagged_ids(ch, retag)))
         if tagger.submitted:
             head("Tagging with Claude")
             say(f"  {plural(tagger.submitted, 'video')} queued, tagging in the background "
                 f"{int(settings.get('tag_workers') or TAG_WORKERS)} at a time. Progress shows on the lines below.")
     elif use_batch:
-        pump = BatchPump(anth, tag_model, channels, retag_old=bool(settings.get("retag_old")))
+        pump = BatchPump(anth, tag_model, channels, retag_old=retag)
         pump.submit_pre_existing()  # queue already-downloaded-but-untagged videos (belt-first, in the background)
         head("Batch tagging with Claude (about half price)")
         say("  Videos go to Claude's batch service in rolling chunks as they download, so tagging runs in\n"
@@ -3349,10 +3502,10 @@ def _update(settings, unattended):
     if any_work and total_tr:
         belt = tagger or pump
         head("Downloading transcripts" + (" and tagging as they land" if belt else ""))
-        quota = transcript_quota(channels)
+        quota = transcript_quota(channels, todo_by)
         jobs = []
         for ch in channels:
-            todo = pending_transcripts(ch)
+            todo = todo_by.get(ch["slug"]) or pending_transcripts(ch)
             if quota is not None:
                 if len(todo) > quota[ch["slug"]]:
                     warn(f"  {channel_label(ch)}: {len(todo) - quota[ch['slug']]} left for next time (budget)")
@@ -3362,7 +3515,7 @@ def _update(settings, unattended):
         if jobs:
             # embed semantic channels in the background as transcripts land, so the heavy indexing
             # is mostly done by the time downloads finish (the CPU is otherwise idle during the wait)
-            ib = IndexBelt(channels, mapping, model_name) if any(
+            ib = IndexBelt(all_ch, mapping, model_name) if any(
                 ch.get("search") != "keyword" for ch, _ in jobs) else None
 
             def on_saved(ch, ids):
@@ -3384,7 +3537,7 @@ def _update(settings, unattended):
         belt = tagger or pump
         head("Downloading transcripts" + (" and tagging as they land" if belt else ""))
         feed = Queue()
-        ib = IndexBelt(channels, mapping, model_name) if any(
+        ib = IndexBelt(all_ch, mapping, model_name) if any(
             ch.get("search") != "keyword" for ch in channels) else None
 
         def on_saved(ch, ids):
@@ -3395,15 +3548,14 @@ def _update(settings, unattended):
 
         def run_listing():
             _STATUS_QUIET.on = True  # the download line owns the screen; keep listing bars off it
-            for ch in channels:
+
+            def feed_channel(ch):
                 try:
-                    if plans[ch["slug"]]:
-                        fetch_listing(client, ch, plans[ch["slug"]], confirm)
-                        ch["full_refresh"] = False
                     feed.put((ch, pending_transcripts(ch)))
                 except Exception as e:
                     err(f"\n  {channel_label(ch)}: listing failed ({str(e)[:100]})")
                     feed.put((ch, []))
+            list_channels(client, channels, plans, confirm, on_done=feed_channel, show=False)
             save_settings(settings)
             feed.put(None)
 
@@ -3423,8 +3575,8 @@ def _update(settings, unattended):
     build_and_index(mapping, "Files and search index")
 
     def finish_retag():
-        if settings.get("retag_old") and not any(0 < tag_version(ch, v["videoId"]) < TAG_VERSION
-                                                 for ch in channels for v in load_videos(ch)):
+        # videos tagged with an older method = those untagged_ids flags only when retag_old is on
+        if retag and not any(untagged_ids(ch, True) - untagged_ids(ch) for ch in all_ch):
             settings["retag_old"] = False
             save_settings(settings)
             ok("All videos are now tagged with the latest method.")
@@ -3450,7 +3602,7 @@ def _update(settings, unattended):
             if ooc:
                 warn("  Claude credit ran out during batch tagging. The rest gets tagged next update.")
             finish_retag()
-            mapping = cleanup_topics(anth, tag_model, channels)
+            mapping = cleanup_topics(anth, tag_model, all_ch)
             build_and_index(mapping, "Adding summaries and topics")
     elif tagger and tagger.futs:
         if any(not f.done() for f in tagger.futs):
@@ -3458,7 +3610,7 @@ def _update(settings, unattended):
         head("Finishing tagging")
         tagger.wait()
         finish_retag()
-        mapping = cleanup_topics(anth, tag_model, channels)
+        mapping = cleanup_topics(anth, tag_model, all_ch)
         build_and_index(mapping, "Adding summaries and topics")
     elif not any_work:
         ok("Everything is already downloaded and tagged.")
@@ -3469,9 +3621,9 @@ def _update(settings, unattended):
     except Exception as e:
         warn(f"  (couldn't refresh the app view: {str(e)[:100]})")
 
-    fails = sum(1 for ch in channels for f in load_failed(ch).values() if f.get("attempts", 0) >= MAX_FAIL_ATTEMPTS)
-    left = sum(len(pending_transcripts(ch)) for ch in channels)
-    run_summary(channels, before, run_start, run_iso, left, fails)
+    fails = sum(1 for ch in all_ch for f in load_failed(ch).values() if f.get("attempts", 0) >= MAX_FAIL_ATTEMPTS)
+    left = sum(len(pending_transcripts(ch)) for ch in all_ch)
+    run_summary(all_ch, before, run_start, run_iso, left, fails)
 
 
 def run_summary(channels, before, run_start, run_iso, left, fails):
@@ -3510,15 +3662,16 @@ def unindexed_chunks(ch):
     return max(0, total - int((read_obj(p["search"] / "meta.json")).get("count") or 0))
 
 
-def time_estimate(settings, channels):
+def time_estimate(settings, channels, todo_by=None):
     measured = bool(read_json(PERF_PATH, {}))
     slots = max(1, int(get_perf("parallel_dl", PARALLEL_BATCHES) or PARALLEL_BATCHES))
     workers = max(1, int(settings.get("tag_workers") or TAG_WORKERS))
-    todo = [v for ch in channels for v in pending_transcripts(ch)]
-    n_tag = sum(1 for ch in channels for v in load_videos(ch) if needs_tag(ch, v["videoId"], settings.get("retag_old")))
+    todo_by = todo_by or {ch["slug"]: pending_transcripts(ch) for ch in channels}
+    todo = [v for ch in channels for v in todo_by.get(ch["slug"], [])]
+    n_tag = sum(len(untagged_ids(ch, bool(settings.get("retag_old")))) for ch in channels)
     n_tag += len(todo)
     sem = [ch for ch in channels if ch.get("search") != "keyword"]
-    new_chunks = sum((v.get("durationSeconds") or 1200) / 60 for ch in sem for v in pending_transcripts(ch)) \
+    new_chunks = sum((v.get("durationSeconds") or 1200) / 60 for ch in sem for v in todo_by.get(ch["slug"], [])) \
         + sum(unindexed_chunks(ch) for ch in sem)
     dl = len(todo) * get_perf("dl_sec_per_video_slot", 5.0) / slots
     ix = new_chunks / get_perf("index_chunks_per_sec", 20.0)
@@ -3545,13 +3698,14 @@ def time_estimate(settings, channels):
     return f"Estimated time: about {m(total)} ({', '.join(parts)}; {basis})"
 
 
-def transcript_quota(channels):
+def transcript_quota(channels, todo_by=None):
     """Overnight mode: share what the Apify budget allows across channels, newest videos first."""
     left = budget_left("apify")
     if left is None:
         return None
     allowed = int(left / EST_TRANSCRIPT)
-    want = {ch["slug"]: len(pending_transcripts(ch)) for ch in channels}
+    todo_by = todo_by or {}
+    want = {ch["slug"]: len(todo_by.get(ch["slug"]) or pending_transcripts(ch)) for ch in channels}
     quota = {k: 0 for k in want}
     while allowed > 0 and any(quota[k] < want[k] for k in want):
         for k in want:
@@ -3575,6 +3729,7 @@ def ask_money(prompt, default):
 def update_overnight(settings):
     global BUDGET
     head("Overnight update")
+    only = pick_scope(settings)
     a, c, bal = balance_line()
     say(a)
     say(c)
@@ -3591,7 +3746,7 @@ def update_overnight(settings):
     BUDGET = {"apify": apify_cap, "claude": claude_cap, "start": datetime.now().isoformat(timespec="seconds")}
     t0 = time.time()
     try:
-        update(settings, unattended=True)
+        update(settings, unattended=True, only=only)
     finally:
         spent_a = spent_since(BUDGET["start"], "apify")
         spent_c = spent_since(BUDGET["start"], "claude")
@@ -4313,51 +4468,148 @@ def ask(settings):
 
 # ---------------------------------------------------------------- duplicate / excerpt detection
 
-def _video_shingles(v, k=12):
-    """Hashes of k-word runs of a video's (normalised) transcript. Arabic is folded like the search,
-    so caption spelling noise doesn't block matches."""
-    words = norm_text(" ".join(s["text"] for s in v.get("segments") or [])).split()
-    if len(words) < k:
-        return set()
-    return {hash(" ".join(words[i:i + k])) for i in range(len(words) - k + 1)}
+DUP_K = 12          # a "run" is 12 consecutive words
+DUP_SAMPLE = 4      # keep 1 run in 4 (chosen by hash): the containment ratio is the same, memory and matching 1/4
+DUP_FP_VERSION = 1  # bump if the fingerprint recipe changes, so cached fingerprints are redone
 
 
-def find_duplicates(channels, k=12, contain=0.80, min_shared=10, min_distinct=15, progress=None):
-    """Find near-verbatim duplicate / excerpt videos. Conservative and quote-aware: runs of words that
-    appear across many videos (shared Quran / hadith and stock phrases) are ignored, so a video is only
-    flagged when its distinctive wording is largely contained in another. Returns a list of groups."""
-    import collections
-    items, df = [], collections.Counter()
-    for ch in channels:
-        for v in load_videos(ch):
-            sh = _video_shingles(v, k)
+def _shingle_hashes(words, k=DUP_K):
+    """Stable 64-bit hashes of the k-word runs of a transcript, sampled 1 in DUP_SAMPLE, as a sorted
+    unique numpy array. numpy does the rolling hash; the words are keyed with crc32 rather than hash(),
+    which changes every run, so fingerprints can be cached and compared across runs and processes."""
+    import numpy as np
+    from zlib import crc32
+    n = len(words)
+    if n < k:
+        return np.zeros(0, dtype=np.uint64)
+    w = np.fromiter((crc32(x.encode("utf-8")) for x in words), dtype=np.uint64, count=n)
+    m = n - k + 1
+    acc = np.zeros(m, dtype=np.uint64)
+    prime = np.uint64(1099511628211)
+    for j in range(k):
+        acc = acc * prime + w[j:j + m]            # wraps mod 2**64, as intended
+    mixed = acc * np.uint64(0x9E3779B97F4A7C15)   # spread the bits before sampling on the top ones
+    keep = (mixed >> np.uint64(62)) == 0          # top 2 bits zero -> 1 in 4
+    return np.unique(acc[keep])
+
+
+def _dup_fingerprint(job):
+    """One video's duplicate fingerprint, from its raw transcript file. Runs in a worker process."""
+    slug, path = job
+    import numpy as np
+    v = read_json(path)
+    if not isinstance(v, dict) or not v.get("segments"):
+        return None
+    segs = norm_segments(v["segments"], v.get("durationSeconds"))
+    words = norm_text(" ".join(s["text"] for s in segs)).split()
+    st = os.stat(path)
+    meta = {"title": v.get("title") or "", "words": len(words), "dur": v.get("durationSeconds") or 0,
+            "date": v.get("date") or "", "mtime": st.st_mtime_ns, "size": st.st_size}
+    return slug, Path(path).stem, meta, _shingle_hashes(words)
+
+
+def _channel_fingerprints(ch, progress=None, pool=None):
+    """Fingerprints for every transcript of a channel: {vid: (meta, hashes)}. Kept in the channel
+    folder (dupfp.npy + dupfp.json) and reused while a transcript file is unchanged, so a rescan only
+    fingerprints new videos. New ones are computed on all cores via `pool`."""
+    import numpy as np
+    base = cpaths(ch)["base"]
+    idx_path, arr_path = base / "dupfp.json", base / "dupfp.npy"
+    idx = read_obj(idx_path)
+    old, arr = {}, None
+    if idx.get("version") == DUP_FP_VERSION and idx.get("k") == DUP_K and idx.get("sample") == DUP_SAMPLE \
+            and isinstance(idx.get("videos"), dict) and arr_path.exists():
+        try:
+            arr = np.load(arr_path)
+            old = idx["videos"]
+        except Exception:
+            arr, old = None, {}
+    out, todo = {}, []
+    for f in sorted(cpaths(ch)["raw"].glob("*.json")) if cpaths(ch)["raw"].exists() else []:
+        st = f.stat()
+        o = old.get(f.stem)
+        if o and o.get("mtime") == st.st_mtime_ns and o.get("size") == st.st_size \
+                and arr is not None and o["off"] + o["n"] <= len(arr):
+            out[f.stem] = (o, arr[o["off"]:o["off"] + o["n"]])
             if progress:
                 progress()
-            if not sh:
-                continue
-            items.append({"slug": ch["slug"], "channel": full_name(ch), "vid": v["videoId"],
-                          "title": v.get("title") or "", "words": video_words(v),
-                          "dur": v.get("durationSeconds") or 0, "date": v.get("date") or "", "sh": sh})
-            for s in sh:
-                df[s] += 1
+        else:
+            todo.append((ch["slug"], str(f)))
+    if todo:
+        results = pool.map(_dup_fingerprint, todo, chunksize=8) if pool else map(_dup_fingerprint, todo)
+        for r in results:
+            if progress:
+                progress()
+            if r:
+                _, vid, meta, h = r
+                out[vid] = (meta, h)
+    if todo or len(out) != len(old):  # something new or something gone: rewrite the cache compactly
+        videos, parts, off = {}, [], 0
+        for vid, (meta, h) in out.items():
+            videos[vid] = {**{k: meta[k] for k in ("title", "words", "dur", "date", "mtime", "size")},
+                           "off": off, "n": int(len(h))}
+            parts.append(h)
+            off += len(h)
+        packed = np.concatenate(parts) if parts else np.zeros(0, dtype=np.uint64)
+        with open(base / "dupfp.tmp", "wb") as f:
+            np.save(f, packed)
+        replace_file(base / "dupfp.tmp", arr_path)
+        write_json(idx_path, {"version": DUP_FP_VERSION, "k": DUP_K, "sample": DUP_SAMPLE, "videos": videos})
+    return out
+
+
+def find_duplicates(channels, contain=0.80, min_shared=10, min_distinct=15, progress=None):
+    """Find near-verbatim duplicate / excerpt videos. Conservative and quote-aware: runs of words that
+    appear across many videos (shared Quran / hadith and stock phrases) are ignored, so a video is only
+    flagged when its distinctive wording is largely contained in another. Returns a list of groups.
+    min_shared / min_distinct are in whole-transcript runs; they are scaled to the sampled fingerprint."""
+    import collections
+    import numpy as np
+    from concurrent.futures import ProcessPoolExecutor
+    items = []
+    workers = max(1, (os.cpu_count() or 2) - 1)
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        for ch in channels:
+            for vid, (meta, h) in _channel_fingerprints(ch, progress, pool).items():
+                if len(h):
+                    items.append({"slug": ch["slug"], "channel": full_name(ch), "vid": vid, "title": meta["title"],
+                                  "words": meta["words"], "dur": meta["dur"], "date": meta["date"], "fp": h})
     n = len(items)
     if n < 2:
         return []
     maxdf = max(4, round(0.005 * n))      # ignore runs seen in more than ~0.5% of videos (shared quotes)
+    ms = max(2, round(min_shared / DUP_SAMPLE))
+    md = max(4, round(min_distinct / DUP_SAMPLE))
+
+    # every (hash, owner) pair, sorted by hash: equal hashes sit together
+    counts = np.fromiter((len(it["fp"]) for it in items), dtype=np.int64, count=n)
+    allh = np.concatenate([it["fp"] for it in items])
+    owner = np.repeat(np.arange(n), counts)
+    order = np.argsort(allh, kind="stable")
+    allh, owner = allh[order], owner[order]
     for it in items:
-        it["dist"] = {s for s in it["sh"] if df[s] <= maxdf}
-        it["sh"] = None
-    inv = collections.defaultdict(list)
-    for idx, it in enumerate(items):
-        if len(it["dist"]) >= min_distinct:
-            for s in it["dist"]:
-                inv[s].append(idx)
-    overlap = collections.Counter()
-    for lst in inv.values():
-        if 2 <= len(lst) <= maxdf + 2:
-            for a in range(len(lst)):
-                for b in range(a + 1, len(lst)):
-                    overlap[(lst[a], lst[b])] += 1
+        it["fp"] = None
+    _, df = np.unique(allh, return_counts=True)
+    df_each = np.repeat(df, df)                       # how many videos share each element's run
+    distinctive = df_each <= maxdf
+    dist_count = np.bincount(owner[distinctive], minlength=n)   # distinctive runs per video
+    eligible = dist_count >= md
+    # shared distinctive runs between eligible videos -> overlap count per pair
+    sel = distinctive & (df_each >= 2) & eligible[owner]
+    h2, o2 = allh[sel], owner[sel]
+    _, start, cnt = np.unique(h2, return_index=True, return_counts=True)
+    pair_keys = []
+    two = start[cnt == 2]
+    if len(two):
+        a, b = o2[two], o2[two + 1]
+        pair_keys.append(np.minimum(a, b).astype(np.int64) * n + np.maximum(a, b))
+    for s, c in zip(start[cnt > 2], cnt[cnt > 2]):    # rare: a run shared by 3+ videos
+        grp = np.sort(o2[s:s + c])
+        ia, ib = np.triu_indices(len(grp), 1)
+        pair_keys.append(grp[ia].astype(np.int64) * n + grp[ib])
+    if not pair_keys:
+        return []
+    keys, ov = np.unique(np.concatenate(pair_keys), return_counts=True)
     parent = list(range(n))
 
     def find(x):
@@ -4367,11 +4619,12 @@ def find_duplicates(channels, k=12, contain=0.80, min_shared=10, min_distinct=15
         return x
 
     flagged = {}
-    for (ia, ib), ov in overlap.items():
-        if ov < min_shared:
+    for key, o in zip(keys.tolist(), ov.tolist()):
+        if o < ms:
             continue
-        small = ia if len(items[ia]["dist"]) <= len(items[ib]["dist"]) else ib
-        c = ov / max(1, len(items[small]["dist"]))
+        ia, ib = divmod(key, n)
+        small = ia if dist_count[ia] <= dist_count[ib] else ib
+        c = o / max(1, int(dist_count[small]))
         if c >= contain:
             ra, rb = find(ia), find(ib)
             if ra != rb:
@@ -4486,14 +4739,34 @@ def duplicates_menu(settings):
 
 # ---------------------------------------------------------------- menu screens
 
+_LIVE_IDS = {}  # slug -> (listing file stat, live video ids): the menu redraws often, the listing rarely changes
+
+
+def live_ids(ch):
+    """Ids of the channel's live streams, from its listing. Re-read only when the listing file changed
+    (the big listings take a couple of seconds to parse, and the menu header asks on every redraw)."""
+    path = cpaths(ch)["list"]
+    try:
+        st = path.stat()
+        key = (st.st_mtime_ns, st.st_size)
+    except OSError:
+        return set()
+    hit = _LIVE_IDS.get(ch["slug"])
+    if hit and hit[0] == key:
+        return hit[1]
+    _, listing = load_listing(ch)
+    ids = {v["videoId"] for v in listing if v.get("type") == "live"}
+    _LIVE_IDS[ch["slug"]] = (key, ids)
+    return ids
+
+
 def channel_stats(ch):
     p = cpaths(ch)
     raw = len(list(p["raw"].glob("*.json"))) if p["raw"].exists() else 0
     tagged = len(list(p["tags"].glob("*.json"))) if p["tags"].exists() else 0
     lives = 0
     if p["raw"].exists():
-        _, listing = load_listing(ch)
-        lv = {v["videoId"] for v in listing if v.get("type") == "live"}
+        lv = live_ids(ch)
         lives = sum(1 for f in p["raw"].glob("*.json") if f.stem in lv)
     nocaps = errors = 0
     for f in load_failed(ch).values():
@@ -4600,8 +4873,9 @@ def add_channel(settings):
     if ch["search"] == "keyword":
         say(f"{D}Search for this channel uses keyword search with Arabic-aware matching: fast to build even for huge\n"
             f"channels. When you ask a question, Claude turns it into the Arabic terms a scholar would use.{X}")
-    if yes("Run the update now?"):
-        update(settings)
+    # no update here: add as many channels as you like, then Update (1) or Overnight (2) offers to do
+    # just the new ones
+    say("Add another channel, or run Update (1) / Overnight (2) and pick 'just the new channel(s)'.")
 
 
 def channel_menu(settings):
@@ -5150,7 +5424,7 @@ def menu():
             if k == "0":
                 return
             if k == "1":
-                update(settings)
+                update(settings, only=pick_scope(settings))
             elif k == "2":
                 update_overnight(settings)
             elif k == "3":
@@ -5196,7 +5470,7 @@ if __name__ == "__main__":
         else:
             s = load_settings()
             if cmd == "update":
-                update(s)
+                update(s, only=pick_scope(s))
             elif cmd == "overnight":
                 update_overnight(s)
             elif cmd == "ask":

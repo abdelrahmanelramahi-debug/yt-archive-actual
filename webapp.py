@@ -50,8 +50,29 @@ def parse_t(url):
     return int(m.group(1)) if m else 0
 
 
+def build_src(stats):
+    """What the app is built from: the per-channel stats, the combined data files, the clip nesting
+    and this file's own page code. While it matches the saved stamp, the app folder is current."""
+    import hashlib
+    parts = [hashlib.md5((INDEX_HTML + APP_JS).encode("utf-8")).hexdigest()[:12],
+             hashlib.md5(json.dumps(stats.get("channels", {}), sort_keys=True).encode("utf-8")).hexdigest()[:12]]
+    for f in (ALL / "videos.json", ALL / "chunks.jsonl", ALL / "topics.json", OUTPUT / "nests.json"):
+        try:
+            st = f.stat()
+            parts.append(f"{st.st_mtime_ns}:{st.st_size}")
+        except OSError:
+            parts.append("-")
+    return "|".join(parts)
+
+
 def build():
     stats = read_json(OUTPUT / "stats.json", {}) or {}
+    src = build_src(stats)
+    stamp = ALL / ".app_stamp.json"
+    if (read_json(stamp, {}) or {}).get("src") == src and (APP / "index.html").exists() \
+            and (DATA / "meta.json").exists():
+        print("Archive app is current (nothing changed since it was last built).")
+        return
     videos = read_json(ALL / "videos.json", []) or []
     if not videos:
         print("No output/ALL/videos.json yet. Run an Update first.")
@@ -198,6 +219,7 @@ def build():
 
     (APP / "index.html").write_text(INDEX_HTML, encoding="utf-8")
     (APP / "app.js").write_text(APP_JS, encoding="utf-8")
+    write_min(stamp, {"src": src})
 
     print(f"Built app for {len(rows):,} videos: {n_list} list shard(s), {n_detail} detail shard(s), "
           f"{len(topics_meta)} topics.")
