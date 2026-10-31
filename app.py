@@ -2195,6 +2195,11 @@ class BatchPump:
             n = self.submitted_videos
         return f"{n:,} sent to batch" if n else "batching tags"
 
+    def finish_submitting(self):
+        """Downloads are done: send the last partial batch now, so Claude works on it while the
+        search index builds, instead of only once collect() is reached."""
+        self._stop = True
+
     def collect(self, status_fn=None):
         self._stop = True
         self.worker.join(timeout=1200)  # drain the queue and flush the last partial batch
@@ -4088,7 +4093,10 @@ def _update(settings, unattended, only=None):
                 ok(f"  {channel_label(ch)}: {saved.get(ch['slug'], 0)} saved")
 
     # 6. build files + search now so questions work immediately, then (below) wait for tagging to
-    #    finish and rebuild once more so the final summaries and topics are in place.
+    #    finish and rebuild once more so the final summaries and topics are in place. The last
+    #    partial tag batch goes off first, so Claude tags it while the index builds.
+    if pump:
+        pump.finish_submitting()
     build_and_index(mapping, "Files and search index")
 
     def finish_retag():
