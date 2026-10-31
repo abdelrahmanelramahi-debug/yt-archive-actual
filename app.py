@@ -12,6 +12,7 @@ Command line (optional):
   python app.py balance    show balances / spending
 """
 import csv
+import gzip
 import html
 import json
 import os
@@ -22,6 +23,7 @@ import time
 import urllib.request
 import warnings
 from urllib.parse import quote, unquote
+from collections import deque
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -4964,6 +4966,48 @@ def _git_push_settings():
                     f"data: publish {datetime.now():%Y-%m-%d %H:%M}")
 
 
+class _ParallelGzip:
+    """A write-only .gz file that compresses on every core. The tar stream is cut into blocks, each
+    gzipped on its own thread (zlib releases the GIL) into a complete gzip member, and the members are
+    written in order. Concatenated members are a standard .gz - gzip, GNU tar and Python all read them
+    as one stream - so the brain's `tar -xzf` needs no change. tarfile's own "w:gz" is single-core
+    gzip -9, which made packaging take ~10 minutes; level 6 gives the same size here at twice the
+    speed per core."""
+    BLOCK = 16 * 1024 * 1024
+
+    def __init__(self, path, level=6):
+        self.f = open(path, "wb")
+        self.level = level
+        workers = max(1, (os.cpu_count() or 2) - 1)
+        self.pool = ThreadPoolExecutor(max_workers=workers)
+        self.inflight = workers * 2  # bounds memory to ~2 blocks per worker
+        self.pending = deque()
+        self.buf = bytearray()
+
+    def write(self, data):
+        self.buf += data
+        while len(self.buf) >= self.BLOCK:
+            self._submit(bytes(self.buf[:self.BLOCK]))
+            del self.buf[:self.BLOCK]
+        return len(data)
+
+    def _submit(self, block):
+        self.pending.append(self.pool.submit(gzip.compress, block, self.level))
+        while len(self.pending) > self.inflight:
+            self.f.write(self.pending.popleft().result())
+
+    def close(self):
+        try:
+            if self.buf:
+                self._submit(bytes(self.buf))
+                self.buf = bytearray()
+            while self.pending:
+                self.f.write(self.pending.popleft().result())
+        finally:
+            self.pool.shutdown(cancel_futures=True)
+            self.f.close()
+
+
 def publish_data(settings):
     """Package the search data and put it live on the website in one go.
 
@@ -4976,7 +5020,10 @@ def publish_data(settings):
     out = ROOT / "archive-data.tar.gz"
     added, missing = 0, []
     say("Packaging the website's search data ...")
-    with tarfile.open(out, "w:gz") as tar:
+    t0 = time.time()
+    gz = _ParallelGzip(out)
+    try:
+        tar = tarfile.open(fileobj=gz, mode="w|")  # plain tar stream; _ParallelGzip compresses it
         for ch in settings["channels"]:
             p = cpaths(ch)
             chunks = p["data"] / "chunks.jsonl"
@@ -4991,6 +5038,9 @@ def publish_data(settings):
             tar.add(p["search"], arcname=f"{ch['slug']}/search")
             added += 1
             say(f"  + {channel_label(ch)}")
+        tar.close()  # writes the tar end-of-archive blocks into the gzip stream
+    finally:
+        gz.close()
     if not added:
         warn("No channels have a search index yet - run Update first. Nothing to publish.")
         try:
@@ -5000,7 +5050,7 @@ def publish_data(settings):
         return
     size_mb = out.stat().st_size / 1_000_000
     say("")
-    ok(f"Built {out.name}: {added} channel(s), {size_mb:,.0f} MB")
+    ok(f"Built {out.name}: {added} channel(s), {size_mb:,.0f} MB in {fmt_duration(time.time() - t0)}")
     if missing:
         warn(f"Skipped (no search index yet): {', '.join(missing)}")
 
