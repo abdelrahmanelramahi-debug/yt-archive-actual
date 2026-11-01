@@ -4439,9 +4439,6 @@ def render_answer(text):
 
 
 CAND_MAX = 500        # how many top moments to feed the deep-answer map-reduce per question
-MAP_WAVE = 12         # excerpt batches (of 25) read at once; the answer stops early between waves...
-MAP_MIN_READ = 300    # ...but never before this many excerpts are read...
-MAP_STOP_FOUND = 1    # ...and only when a whole wave turns up at most this many relevant findings
 ANSWER_MAX_DEFAULT = 12000  # answer token ceiling when a mode/caller sets none (comprehensive answers)
 CUSTOM_MOMENTS_MAX = 10000  # admin "custom" depth ceiling (soft - the UI shows diminishing returns)
 CUSTOM_ANSWER_MAX = 32000   # answer-length ceiling, safely within the answer model's output limit
@@ -4566,7 +4563,7 @@ def _reduce_prompt(q, candidates, findings, style, names, lang):
 def _map_findings(anth, settings, q, candidates):
     """The 'map' half of the deep answer: the cheap tag model distills the candidate excerpts into a
     compact findings block in parallel, condensing in a middle layer when there are too many. Returns
-    (findings_text, usd, n_read): n_read is how many of the candidates were read (fewer on an early stop)."""
+    (findings_text, usd)."""
     numbered = _numbered_excerpts(candidates)
     cost = [0.0]
     lock = Lock()
@@ -4577,44 +4574,32 @@ def _map_findings(anth, settings, q, candidates):
             cost[0] += u
         return txt
 
-    read = len(candidates)
     if len(candidates) <= 40:
         findings = "\n\n".join(numbered)  # small set: let the answer model read the excerpts directly
     else:
         batches = [numbered[i:i + 25] for i in range(0, len(numbered), 25)]
-        # read in waves of MAP_WAVE batches (the same 12 at a time as before, so about as fast), best-ranked
-        # first. Once at least MAP_MIN_READ excerpts are read, a wave that turns up (almost) nothing means
-        # the lower-ranked rest is off-topic too: stop there instead of paying to read it.
-        lines = []
-        with ThreadPoolExecutor(max_workers=min(MAP_WAVE, len(batches))) as ex:
-            for w in range(0, len(batches), MAP_WAVE):
-                wave = list(ex.map(lambda b: cheap(MAP_PROMPT.format(q=q, batch="\n\n".join(b))),
-                                   batches[w:w + MAP_WAVE]))
-                found = [ln for r in wave if r and r.strip().upper() != "NONE"
-                         for ln in r.strip().splitlines() if ln.strip()]
-                lines += found
-                read = sum(len(b) for b in batches[:w + MAP_WAVE])
-                if read >= MAP_MIN_READ and len(found) <= MAP_STOP_FOUND and w + MAP_WAVE < len(batches):
-                    break
-            read = min(read, len(candidates))
+        with ThreadPoolExecutor(max_workers=min(12, len(batches))) as ex:
+            mapped = list(ex.map(lambda b: cheap(MAP_PROMPT.format(q=q, batch="\n\n".join(b))), batches))
+        lines = [ln for r in mapped if r and r.strip().upper() != "NONE"
+                 for ln in r.strip().splitlines() if ln.strip()]
         if len(lines) > 900:  # only for truly massive sets: condense in a middle layer first
             groups = [lines[i:i + 60] for i in range(0, len(lines), 60)]
             with ThreadPoolExecutor(max_workers=min(8, len(groups))) as ex:
                 cond = list(ex.map(lambda g: cheap(MIDREDUCE_PROMPT.format(q=q, findings="\n".join(g))), groups))
             lines = [ln for r in cond if r and r.strip() for ln in r.strip().splitlines() if ln.strip()]
         findings = "\n".join(lines) or "NONE"
-    return findings, cost[0], read
+    return findings, cost[0]
 
 
 def _deep_answer(anth, settings, q, candidates, lang, names, style=None, answer_max=None):
     """Hierarchical map-reduce: _map_findings distills many excerpts (map), then the answer model
     writes the cited answer (reduce) — topical synthesis, or verbatim quotes. `answer_max` caps the
-    written answer's length (tokens). Returns (answer, usd, n_read)."""
-    findings, cost, read = _map_findings(anth, settings, q, candidates)
+    written answer's length (tokens). Returns (answer, usd)."""
+    findings, cost = _map_findings(anth, settings, q, candidates)
     answer, u = call_claude(anth, settings["answer_model"],
                             _reduce_prompt(q, candidates, findings, style, names, lang),
                             answer_max or ANSWER_MAX_DEFAULT)
-    return answer, cost + u, read
+    return answer, cost + u
 
 
 def searchable_channels(settings):
@@ -4818,13 +4803,13 @@ def synthesize(ctx, q, candidates, style=None, answer_max=None):
     """Write the cited answer from the candidate moments (the deep map-reduce). `answer_max` caps the
     written answer's length. Returns {answer, usd, cited, coverage}. Raises on a Claude error
     (callers handle credit/billing)."""
-    answer, usd, read = _deep_answer(ctx["anth"], ctx["settings"], q, candidates, ctx["lang"], ctx["names"], style, answer_max)
+    answer, usd = _deep_answer(ctx["anth"], ctx["settings"], q, candidates, ctx["lang"], ctx["names"], style, answer_max)
     cited = sorted({int(n) for grp in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", answer)
                     for n in re.findall(r"\d+", grp) if 0 < int(n) <= len(candidates)})
     cov_c = len({candidates[n - 1].get("channel") for n in cited}) or len(ctx["scope"])
     return {"answer": answer, "usd": usd, "cited": cited,
-            "coverage": {"moments": read,  # the moments actually read (fewer when it stopped early)
-                         "videos": len({c["video_id"] for c in candidates[:read]}), "channels": cov_c}}
+            "coverage": {"moments": len(candidates),
+                         "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}}
 
 
 def _apply_channel_names(ctx, q, candidates, channel_names):
@@ -4889,7 +4874,7 @@ def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel
         return
     candidates = _apply_channel_names(ctx, q, candidates, channel_names)
     yield ("status", "reading")
-    findings, map_cost, read = _map_findings(ctx["anth"], ctx["settings"], q, candidates)
+    findings, map_cost = _map_findings(ctx["anth"], ctx["settings"], q, candidates)
     yield ("status", "writing")
     prompt = _reduce_prompt(q, candidates, findings, style, ctx["names"], ctx["lang"])
     answer, reduce_cost, emitted = "", 0.0, set()
@@ -4916,8 +4901,8 @@ def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel
     yield from new_sources(answer)  # sources stream in after the full answer (keeps the text smooth)
     cov_c = len({candidates[n - 1].get("channel") for n in sorted(emitted)}) or len(ctx["scope"])
     yield ("done", {"usd": map_cost + reduce_cost,
-                    "coverage": {"moments": read,  # the moments actually read (fewer when it stopped early)
-                                 "videos": len({c["video_id"] for c in candidates[:read]}), "channels": cov_c}})
+                    "coverage": {"moments": len(candidates),
+                                 "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}})
 
 
 def transcript_context(ctx, chunk, before=4, after=4):
