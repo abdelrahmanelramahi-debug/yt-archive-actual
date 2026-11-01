@@ -177,6 +177,8 @@ const DICT: Record<Lang, Record<string, string>> = {
     "whatsnew.polish.b": "Saved answers keep their style, deleting a chat is easier on mobile, and you can Select or Deselect all channels in one tap.",
     "whatsnew.bugfix.t": "Bug fixes",
     "whatsnew.bugfix.b": "Small fixes and tidying behind the scenes.",
+    "whatsnew.sc.t": "Speakers Corner",
+    "whatsnew.sc.b": "Sam Dawah and sFDawah are in, adding about 7,800 Speakers Corner conversations. Re-uploads of the same conversation now show once, under the full version.",
   },
   ar: {
     "hero.title": "اسأل عبر الأرشيف",
@@ -348,6 +350,8 @@ const DICT: Record<Lang, Record<string, string>> = {
     "whatsnew.polish.b": "تحتفظ الإجابات المحفوظة بنمطها، وحذف المحادثة أسهل على الجوال، ويمكنك تحديد كل القنوات أو إلغاء تحديدها بنقرة واحدة.",
     "whatsnew.bugfix.t": "إصلاحات",
     "whatsnew.bugfix.b": "إصلاحات صغيرة وتحسينات خلف الكواليس.",
+    "whatsnew.sc.t": "ركن المتحدثين",
+    "whatsnew.sc.b": "أُضيفت قناتا Sam Dawah وsFDawah، بنحو ٧٨٠٠ حوار من ركن المتحدثين في هايد بارك. والمقاطع المكررة من الحوار نفسه تظهر الآن مرة واحدة تحت النسخة الكاملة.",
   },
 };
 
