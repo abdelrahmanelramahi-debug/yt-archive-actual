@@ -434,6 +434,38 @@
       "title_include": [],
       "title_exclude": [],
       "search": "semantic"
+    },
+    {
+      "handle": "@samdawahchannel",
+      "slug": "samdawahchannel",
+      "name": "Sam Dawah",
+      "language": "en",
+      "videos": true,
+      "lives": true,
+      "shorts": false,
+      "max_videos": 0,
+      "full_refresh": false,
+      "min_minutes": 5,
+      "playlist": null,
+      "title_include": [],
+      "title_exclude": [],
+      "search": "semantic"
+    },
+    {
+      "handle": "@sfdawah",
+      "slug": "sfdawah",
+      "name": "sFDawah",
+      "language": "en",
+      "videos": true,
+      "lives": true,
+      "shorts": false,
+      "max_videos": 0,
+      "full_refresh": false,
+      "min_minutes": 5,
+      "playlist": null,
+      "title_include": [],
+      "title_exclude": [],
+      "search": "semantic"
     }
   ],
   "answer_language": "auto",
