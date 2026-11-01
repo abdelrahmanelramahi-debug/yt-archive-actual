@@ -1589,12 +1589,44 @@ MERGE_PROMPT = """These are summaries of consecutive parts of one long YouTube {
 {parts}"""
 
 
-def anthropic_client():
+def anthropic_client(purpose="answer"):
+    """purpose="tag": the terminal's tagging uses ANTHROPIC_TAG_API_KEY when .env has one - a key from
+    its own Console workspace with a spend limit, so a big tagging run stops at that limit instead of
+    using up the credit the website's answers need. Without it, tagging shares the main key."""
     import anthropic
-    key = need_key("ANTHROPIC_API_KEY")
+    key = (need_key("ANTHROPIC_TAG_API_KEY") if purpose == "tag" else None) or need_key("ANTHROPIC_API_KEY")
     if not key:
         return None
     return anthropic.Anthropic(api_key=key, max_retries=8)
+
+
+def separate_tag_key():
+    return bool(need_key("ANTHROPIC_TAG_API_KEY"))
+
+
+def is_credit_error(e):
+    """Out of credit, or a workspace spend limit reached: both mean 'stop calling Claude for now'."""
+    msg = str(e).lower()
+    return any(w in msg for w in ("credit balance", "billing", "insufficient", "usage limit", "spend limit"))
+
+
+def credit_ok(anth, model):
+    """A one-token call: is there Claude credit again (e.g. after a top-up mid-run)?"""
+    try:
+        anth.messages.create(model=model, max_tokens=1, messages=[{"role": "user", "content": "hi"}])
+        return True
+    except Exception:
+        return False
+
+
+def credit_out_warning():
+    if separate_tag_key():
+        warn("  The tagging key reached its spend limit. The website has its own key, so answers are unaffected.\n"
+             "  The rest gets tagged next update (raise the limit in the Console to finish sooner).")
+    else:
+        warn("  Claude credit ran out during tagging. The rest gets tagged next update.")
+        err("  This also stops the website from answering questions until you add credit at\n"
+            "  console.anthropic.com/settings/billing. A separate tagging key (ANTHROPIC_TAG_API_KEY) prevents this.")
 
 
 def call_claude(client, model, prompt, max_tokens):
@@ -1873,7 +1905,10 @@ def submit_tag_batch(anth, model, jobs, channels):
     i = 0
     while i < len(prepped):
         reqs = []
-        rec = {"batch_id": None, "when": datetime.now().isoformat(timespec="seconds"), "videos": {}, "windows": {}}
+        rec = {"batch_id": None, "when": datetime.now().isoformat(timespec="seconds"), "videos": {}, "windows": {},
+               # batches belong to the key's workspace: remember which key, so recovery asks the right one
+               "key": "tag" if separate_tag_key() and getattr(anth, "api_key", None) == need_key("ANTHROPIC_TAG_API_KEY")
+               else "main"}
         cnt = 0
         while i < len(prepped) and (not reqs or cnt + len(prepped[i][2]) <= MAXREQ):
             ch, v, wins, nch, nwin = prepped[i]
@@ -1890,7 +1925,7 @@ def submit_tag_batch(anth, model, jobs, channels):
         try:
             batch = anth.messages.batches.create(requests=reqs)
         except Exception as e:
-            if any(w in str(e).lower() for w in ("credit", "billing", "insufficient")):
+            if is_credit_error(e):
                 out_of_credit = True
             else:
                 err(f"    batch tagging couldn't start: {str(e)[:150]}")
@@ -1942,10 +1977,14 @@ def recover_tag_batches(anth, model, channels):
     if not pend or anth is None:
         return 0
     total = 0
+    clients = {}
     for rec in list(pend):
         try:
             say("  Collecting a batch tag job left from a previous run...")
-            d, f, u = _collect_tag_batch(anth, model, channels, rec)
+            kind = rec.get("key") or "main"  # older records predate the tagging key: the main key made them
+            if kind not in clients:
+                clients[kind] = anthropic_client("tag" if kind == "tag" else "answer") or anth
+            d, f, u = _collect_tag_batch(clients[kind], model, channels, rec)
             total += d
         except Exception as e:
             warn(f"  couldn't collect an earlier batch tag job ({str(e)[:100]}); "
@@ -2075,13 +2114,12 @@ class Tagger:
                 self.done += 1
                 self.usd += usd
         except Exception as e:
-            msg = str(e).lower()
             with self.lock:
-                if "credit balance" in msg or "billing" in msg:
+                if is_credit_error(e):
                     if not self.out_of_credit:
                         self.out_of_credit = True
-                        say(f"\n    {Y}Claude credit is used up. Tagging stops here; the rest gets tagged next update "
-                            f"after you add credit at console.anthropic.com/settings/billing.{X}")
+                        say("")
+                        credit_out_warning()
                 else:
                     self.failed += 1
                     say(f"\n    {Y}skipped tagging one video ({str(e)[:100]}), retried next update{X}")
@@ -2127,6 +2165,7 @@ class BatchPump:
         self.lock = Lock()
         self.submitted_videos = 0
         self.out_of_credit = False
+        self.ooc_at = 0.0          # when credit last ran out: batches are retried a few minutes later
         self.left = budget_left("claude")  # None = no limit (normal update)
         self.committed = 0.0
         self.price = PRICES.get(model, (1.0, 5.0))
@@ -2134,9 +2173,11 @@ class BatchPump:
         self.worker = Thread(target=self._run, daemon=True)
         self.worker.start()
 
+    OOC_RETRY = 300  # seconds before trying Claude again after "out of credit" (a top-up takes a minute)
+
     def _enqueue(self, ch, vid):
         key = (ch["slug"], vid)
-        if self.out_of_credit or key in self.seen or not needs_tag(ch, vid, self.retag):
+        if key in self.seen or not needs_tag(ch, vid, self.retag):
             return
         self.seen.add(key)
         self.q.put((ch, vid))
@@ -2181,18 +2222,23 @@ class BatchPump:
         self._flush(batch)  # whatever is left when stopping
 
     def _flush(self, batch):
-        if not batch or self.out_of_credit:
+        # while out of credit, skip (those videos stay untagged and are picked up by the final pass or
+        # the next update), but try again every few minutes: a top-up mid-run then resumes tagging
+        if not batch or (self.out_of_credit and time.time() - self.ooc_at < self.OOC_RETRY):
             return
         recs, ooc = submit_tag_batch(self.anth, self.model, batch, self.channels)
         with self.lock:
             self.recs.extend(recs)
             self.submitted_videos += sum(len(r["videos"]) for r in recs)
+            self.out_of_credit = ooc
             if ooc:
-                self.out_of_credit = True
+                self.ooc_at = time.time()
 
     def status(self):
         with self.lock:
-            n = self.submitted_videos
+            n, ooc = self.submitted_videos, self.out_of_credit
+        if ooc:
+            return f"{n:,} sent to batch, PAUSED: no Claude credit" if n else "tagging PAUSED: no Claude credit"
         return f"{n:,} sent to batch" if n else "batching tags"
 
     def finish_submitting(self):
@@ -2248,7 +2294,7 @@ def tag_channel(client, model, ch, workers=TAG_WORKERS):
                     done += 1
                     total_usd += usd
             except Exception as e:
-                if "credit balance" in str(e).lower() or "billing" in str(e).lower():
+                if is_credit_error(e):
                     out_of_credit = True
                     for other in futs:
                         other.cancel()
@@ -3952,7 +3998,10 @@ def _update(settings, unattended, only=None):
             warn(f"Heads up: that's more than your Apify balance ({money(bal['left'])} left). "
                  f"Apify stops runs when the balance runs out. Progress is saved, so you can continue next month or after topping up.")
     # 3. set up Claude (and collect any tag batch left unfinished by an earlier/interrupted run)
-    anth = anthropic_client()
+    anth = anthropic_client("tag")
+    if anth is not None and not separate_tag_key() and any_work:
+        say(f"{D}  Tagging uses the same Claude key as the website. Add ANTHROPIC_TAG_API_KEY (a key with its own\n"
+            f"  spend limit) to .env so a big run can never use up the credit the website needs.{X}")
     if anth is None:
         warn("No ANTHROPIC_API_KEY in .env: transcripts will download but tagging and Q&A are off.")
     else:
@@ -4124,6 +4173,9 @@ def _update(settings, unattended, only=None):
             say("  Collecting the tag batches that processed in the background during download...")
         done, failed, busd = pump.collect()  # drains the worker (final partial batch) then collects all
         ooc = pump.out_of_credit
+        if ooc and credit_ok(anth, tag_model):
+            ooc = False  # credit came back (a top-up mid-run): tag what was skipped in the final pass below
+            ok("  Claude credit is back - tagging the videos skipped while it was out.")
         cap = budget_left("claude")
         # stragglers (load failures etc.): one final batch - unless the run's Claude budget is spent,
         # in which case loading them (all of a big re-tag's remainder) would be for nothing
@@ -4140,7 +4192,7 @@ def _update(settings, unattended, only=None):
             ok(f"  Batch tagged {plural(done, 'video')}"
                + (f", {failed} failed (retried next update)" if failed else "") + f" · {money(busd)}")
             if ooc:
-                warn("  Claude credit ran out during batch tagging. The rest gets tagged next update.")
+                credit_out_warning()
             finish_retag()
             mapping = cleanup_topics(anth, tag_model, all_ch)
             build_and_index(mapping, "Adding summaries and topics")
@@ -4387,6 +4439,9 @@ def render_answer(text):
 
 
 CAND_MAX = 500        # how many top moments to feed the deep-answer map-reduce per question
+MAP_WAVE = 12         # excerpt batches (of 25) read at once; the answer stops early between waves...
+MAP_MIN_READ = 300    # ...but never before this many excerpts are read...
+MAP_STOP_FOUND = 1    # ...and only when a whole wave turns up at most this many relevant findings
 ANSWER_MAX_DEFAULT = 12000  # answer token ceiling when a mode/caller sets none (comprehensive answers)
 CUSTOM_MOMENTS_MAX = 10000  # admin "custom" depth ceiling (soft - the UI shows diminishing returns)
 CUSTOM_ANSWER_MAX = 32000   # answer-length ceiling, safely within the answer model's output limit
@@ -4511,7 +4566,7 @@ def _reduce_prompt(q, candidates, findings, style, names, lang):
 def _map_findings(anth, settings, q, candidates):
     """The 'map' half of the deep answer: the cheap tag model distills the candidate excerpts into a
     compact findings block in parallel, condensing in a middle layer when there are too many. Returns
-    (findings_text, usd)."""
+    (findings_text, usd, n_read): n_read is how many of the candidates were read (fewer on an early stop)."""
     numbered = _numbered_excerpts(candidates)
     cost = [0.0]
     lock = Lock()
@@ -4522,32 +4577,44 @@ def _map_findings(anth, settings, q, candidates):
             cost[0] += u
         return txt
 
+    read = len(candidates)
     if len(candidates) <= 40:
         findings = "\n\n".join(numbered)  # small set: let the answer model read the excerpts directly
     else:
         batches = [numbered[i:i + 25] for i in range(0, len(numbered), 25)]
-        with ThreadPoolExecutor(max_workers=min(12, len(batches))) as ex:
-            mapped = list(ex.map(lambda b: cheap(MAP_PROMPT.format(q=q, batch="\n\n".join(b))), batches))
-        lines = [ln for r in mapped if r and r.strip().upper() != "NONE"
-                 for ln in r.strip().splitlines() if ln.strip()]
+        # read in waves of MAP_WAVE batches (the same 12 at a time as before, so about as fast), best-ranked
+        # first. Once at least MAP_MIN_READ excerpts are read, a wave that turns up (almost) nothing means
+        # the lower-ranked rest is off-topic too: stop there instead of paying to read it.
+        lines = []
+        with ThreadPoolExecutor(max_workers=min(MAP_WAVE, len(batches))) as ex:
+            for w in range(0, len(batches), MAP_WAVE):
+                wave = list(ex.map(lambda b: cheap(MAP_PROMPT.format(q=q, batch="\n\n".join(b))),
+                                   batches[w:w + MAP_WAVE]))
+                found = [ln for r in wave if r and r.strip().upper() != "NONE"
+                         for ln in r.strip().splitlines() if ln.strip()]
+                lines += found
+                read = sum(len(b) for b in batches[:w + MAP_WAVE])
+                if read >= MAP_MIN_READ and len(found) <= MAP_STOP_FOUND and w + MAP_WAVE < len(batches):
+                    break
+            read = min(read, len(candidates))
         if len(lines) > 900:  # only for truly massive sets: condense in a middle layer first
             groups = [lines[i:i + 60] for i in range(0, len(lines), 60)]
             with ThreadPoolExecutor(max_workers=min(8, len(groups))) as ex:
                 cond = list(ex.map(lambda g: cheap(MIDREDUCE_PROMPT.format(q=q, findings="\n".join(g))), groups))
             lines = [ln for r in cond if r and r.strip() for ln in r.strip().splitlines() if ln.strip()]
         findings = "\n".join(lines) or "NONE"
-    return findings, cost[0]
+    return findings, cost[0], read
 
 
 def _deep_answer(anth, settings, q, candidates, lang, names, style=None, answer_max=None):
     """Hierarchical map-reduce: _map_findings distills many excerpts (map), then the answer model
     writes the cited answer (reduce) — topical synthesis, or verbatim quotes. `answer_max` caps the
-    written answer's length (tokens). Returns (answer, usd)."""
-    findings, cost = _map_findings(anth, settings, q, candidates)
+    written answer's length (tokens). Returns (answer, usd, n_read)."""
+    findings, cost, read = _map_findings(anth, settings, q, candidates)
     answer, u = call_claude(anth, settings["answer_model"],
                             _reduce_prompt(q, candidates, findings, style, names, lang),
                             answer_max or ANSWER_MAX_DEFAULT)
-    return answer, cost + u
+    return answer, cost + u, read
 
 
 def searchable_channels(settings):
@@ -4751,13 +4818,13 @@ def synthesize(ctx, q, candidates, style=None, answer_max=None):
     """Write the cited answer from the candidate moments (the deep map-reduce). `answer_max` caps the
     written answer's length. Returns {answer, usd, cited, coverage}. Raises on a Claude error
     (callers handle credit/billing)."""
-    answer, usd = _deep_answer(ctx["anth"], ctx["settings"], q, candidates, ctx["lang"], ctx["names"], style, answer_max)
+    answer, usd, read = _deep_answer(ctx["anth"], ctx["settings"], q, candidates, ctx["lang"], ctx["names"], style, answer_max)
     cited = sorted({int(n) for grp in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", answer)
                     for n in re.findall(r"\d+", grp) if 0 < int(n) <= len(candidates)})
     cov_c = len({candidates[n - 1].get("channel") for n in cited}) or len(ctx["scope"])
     return {"answer": answer, "usd": usd, "cited": cited,
-            "coverage": {"moments": len(candidates),
-                         "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}}
+            "coverage": {"moments": read,  # the moments actually read (fewer when it stopped early)
+                         "videos": len({c["video_id"] for c in candidates[:read]}), "channels": cov_c}}
 
 
 def _apply_channel_names(ctx, q, candidates, channel_names):
@@ -4822,7 +4889,7 @@ def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel
         return
     candidates = _apply_channel_names(ctx, q, candidates, channel_names)
     yield ("status", "reading")
-    findings, map_cost = _map_findings(ctx["anth"], ctx["settings"], q, candidates)
+    findings, map_cost, read = _map_findings(ctx["anth"], ctx["settings"], q, candidates)
     yield ("status", "writing")
     prompt = _reduce_prompt(q, candidates, findings, style, ctx["names"], ctx["lang"])
     answer, reduce_cost, emitted = "", 0.0, set()
@@ -4849,8 +4916,8 @@ def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel
     yield from new_sources(answer)  # sources stream in after the full answer (keeps the text smooth)
     cov_c = len({candidates[n - 1].get("channel") for n in sorted(emitted)}) or len(ctx["scope"])
     yield ("done", {"usd": map_cost + reduce_cost,
-                    "coverage": {"moments": len(candidates),
-                                 "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}})
+                    "coverage": {"moments": read,  # the moments actually read (fewer when it stopped early)
+                                 "videos": len({c["video_id"] for c in candidates[:read]}), "channels": cov_c}})
 
 
 def transcript_context(ctx, chunk, before=4, after=4):
@@ -5051,7 +5118,7 @@ def ask(settings):
         try:
             res = synthesize(ctx, q, candidates)
         except Exception as e:
-            if "credit balance" in str(e).lower() or "billing" in str(e).lower():
+            if is_credit_error(e):
                 err("Claude credit is used up. Add credit at console.anthropic.com/settings/billing, then ask again.")
                 break
             err(f"Claude error: {e}")
@@ -5889,21 +5956,32 @@ def _gh_api(method, url, token, data=None, content_type=None, length=None):
     return json.loads(body) if body else {}
 
 
+GH_PART_MAX = 1_900_000_000  # GitHub refuses release files of 2 GiB or more: bigger archives go up in parts
+
+
 class _ProgressReader:
-    """Streams a file to the upload while printing a percentage, so a big upload does not look stuck."""
-    def __init__(self, path):
+    """Streams a file (or one byte range of it: start/length) to the upload while printing a percentage,
+    so a big upload does not look stuck."""
+    def __init__(self, path, start=0, length=None, label="uploading"):
         self.f = open(path, "rb")
-        self.total = os.path.getsize(path)
+        self.f.seek(start)
+        rest = os.path.getsize(path) - start
+        self.total = rest if length is None else min(length, rest)
+        self.left = self.total
         self.sent = 0
         self._shown = -1
+        self.label = label
 
     def read(self, n=-1):
-        chunk = self.f.read(n)
+        if self.left <= 0:
+            return b""
+        chunk = self.f.read(self.left if n is None or n < 0 else min(n, self.left))
+        self.left -= len(chunk)
         self.sent += len(chunk)
         pct = int(self.sent * 100 / self.total) if self.total else 100
         if pct != self._shown and pct % 5 == 0:
             self._shown = pct
-            print(f"\r  uploading {pct}% ", end="", flush=True)
+            print(f"\r  {self.label} {pct}% ", end="", flush=True)
         return chunk
 
     def __len__(self):
@@ -5914,19 +5992,26 @@ class _ProgressReader:
 
 
 def _upload_release_asset(path, token):
-    """Replace the data archive on the release: delete the old asset, upload the new one (same name)."""
+    """Replace the data archive on the release: delete the old asset(s), upload the new one under the
+    same name. An archive over GH_PART_MAX goes up as consecutive byte ranges - NAME, NAME.part2,
+    NAME.part3 ... - which the server's entrypoint downloads and joins back into one file."""
+    size = os.path.getsize(path)
+    nparts = max(1, -(-size // GH_PART_MAX))
+    names = [GH_ASSET] + [f"{GH_ASSET}.part{i}" for i in range(2, nparts + 1)]
     rel = _gh_api("GET", f"https://api.github.com/repos/{GH_REPO}/releases/tags/{GH_DATA_TAG}", token)
     rel_id = rel["id"]
-    for a in rel.get("assets", []):
-        if a.get("name") == GH_ASSET:
+    for a in rel.get("assets", []):  # the old archive and any old parts (a stale part would corrupt the join)
+        if a.get("name") == GH_ASSET or str(a.get("name", "")).startswith(GH_ASSET + ".part"):
             _gh_api("DELETE", f"https://api.github.com/repos/{GH_REPO}/releases/assets/{a['id']}", token)
-    up = _ProgressReader(path)
-    try:
-        url = f"https://uploads.github.com/repos/{GH_REPO}/releases/{rel_id}/assets?name={GH_ASSET}"
-        _gh_api("POST", url, token, data=up, content_type="application/gzip", length=up.total)
-    finally:
-        up.close()
-    print()  # finish the progress line
+    for i, name in enumerate(names):
+        up = _ProgressReader(path, i * GH_PART_MAX, GH_PART_MAX,
+                             label=f"uploading part {i + 1}/{nparts}" if nparts > 1 else "uploading")
+        try:
+            url = f"https://uploads.github.com/repos/{GH_REPO}/releases/{rel_id}/assets?name={name}"
+            _gh_api("POST", url, token, data=up, content_type="application/gzip", length=up.total)
+        finally:
+            up.close()
+        print()  # finish the progress line
 
 
 def _git_push_paths(paths, msg):

@@ -14,6 +14,7 @@ Only the frontend should call this. Set BRAIN_KEY in the environment and send it
 import hmac
 import json
 import os
+import re
 import threading
 import time
 import uuid
@@ -163,6 +164,91 @@ class AskRequest(BaseModel):
     channel_names: dict[str, dict[str, str]] | None = None  # slug -> {en, ar} admin name overrides
     cand_max: int | None = None        # admin "custom" depth: moments to read in (clamped in the brain)
     answer_max: int | None = None      # admin "custom" depth: answer length in tokens (clamped)
+    fresh: bool | None = None          # true = skip the answer cache and write a new answer
+
+
+# Answer cache: the same question (same words, channels, depth and style) asked again is served from the
+# saved answer - instant and free. Matching is EXACT after light normalisation (case, punctuation, spacing,
+# Arabic harakat and letter forms), never "similar": a reworded question can mean something different, so
+# it gets its own answer. Every entry is tied to the data + code version, so a publish or a code change
+# starts the cache afresh; entries also expire after CACHE_TTL. It lives on the volume (output/), which
+# the entrypoint keeps across restarts (it only clears channel folders).
+CACHE_PATH = brain.OUTPUT / "answer_cache.db"
+CACHE_TTL = 30 * 24 * 3600
+_CACHE = {"ver": None}
+
+
+def _cache_db():
+    import sqlite3
+    con = sqlite3.connect(CACHE_PATH, timeout=10)
+    con.execute("CREATE TABLE IF NOT EXISTS cache (key TEXT PRIMARY KEY, ver TEXT, t REAL, data TEXT)")
+    return con
+
+
+def _cache_version(ctx):
+    """Changes whenever what an answer depends on changes: the data, the code, the channel names."""
+    import hashlib
+    if _CACHE["ver"] is None:
+        h = hashlib.sha256()
+        for f in (brain.ROOT / "app.py", brain.ROOT / "server.py", brain.OUTPUT / ".data-stamp"):
+            try:
+                h.update(f.read_bytes())
+            except OSError:
+                h.update(b"-")
+        h.update(str(ctx.get("total_moments")).encode())
+        h.update(json.dumps(ctx.get("channels_meta"), sort_keys=True, ensure_ascii=False).encode())
+        _CACHE["ver"] = h.hexdigest()[:24]
+    return _CACHE["ver"]
+
+
+def _norm_question(q):
+    t = brain._AR_DIAC.sub("", q or "").translate(brain._AR_TR).lower()
+    return " ".join(re.findall(r"\w+", t))
+
+
+def _cache_key(req, q):
+    import hashlib
+    k = {"q": _norm_question(q), "ch": sorted(req.channels or []), "mode": req.mode or brain.DEFAULT_MODE,
+         "style": req.style or "topical", "names": req.channel_names or {}, "cm": req.cand_max, "am": req.answer_max}
+    return hashlib.sha256(json.dumps(k, sort_keys=True, ensure_ascii=False).encode()).hexdigest()
+
+
+def _cache_get(ctx, req, q):
+    if req.fresh or not _norm_question(q):
+        return None
+    try:
+        con = _cache_db()
+        try:
+            row = con.execute("SELECT data, t FROM cache WHERE key=? AND ver=?",
+                              (_cache_key(req, q), _cache_version(ctx))).fetchone()
+        finally:
+            con.close()
+    except Exception:
+        return None  # the cache is an extra: on any trouble, just answer normally
+    if not row or time.time() - row[1] > CACHE_TTL:
+        return None
+    try:
+        return json.loads(row[0])
+    except ValueError:
+        return None
+
+
+def _cache_put(ctx, req, q, answer, sources, coverage):
+    if not answer or not sources:  # only real, cited answers are worth reusing
+        return
+    try:
+        con = _cache_db()
+        try:
+            con.execute("INSERT OR REPLACE INTO cache VALUES (?,?,?,?)",
+                        (_cache_key(req, q), _cache_version(ctx), time.time(),
+                         json.dumps({"answer": answer, "sources": sources, "coverage": coverage}, ensure_ascii=False)))
+            # tidy: drop other versions and expired entries (cheap: the table stays small)
+            con.execute("DELETE FROM cache WHERE ver != ? OR t < ?", (_cache_version(ctx), time.time() - CACHE_TTL))
+            con.commit()
+        finally:
+            con.close()
+    except Exception:
+        pass
 
 
 def _sse(event, data):
@@ -185,21 +271,32 @@ def _run_job(job, ctx, q, req):
             job["cond"].notify_all()
 
     try:
+        hit = _cache_get(ctx, req, q)
+        if hit:  # asked before with the same data: replay the saved answer, no Claude call
+            put("status", {"stage": "writing"})
+            put("delta", {"text": hit["answer"]})
+            for s in hit["sources"]:
+                put("source", s)
+            put("done", {"coverage": hit["coverage"], "cost_usd": 0.0, "cached": True})
+            return
+        text, sources = [], []
         for kind, payload in brain.answer_question_stream(ctx, q, channels=req.channels, mode=req.mode, style=req.style, channel_names=req.channel_names, cand_max=req.cand_max, answer_max=req.answer_max):
             if kind == "status":
                 put("status", {"stage": payload})
             elif kind == "delta":
+                text.append(payload)
                 put("delta", {"text": payload})
             elif kind == "source":  # one cited moment, streamed in as the answer references it
+                sources.append(payload)
                 put("source", payload)
             elif kind == "empty":
                 put("empty", {})
             elif kind == "done":
                 brain.add_spend("claude", payload["usd"], "web question")
                 put("done", {"coverage": payload["coverage"], "cost_usd": round(payload["usd"], 4)})
+                _cache_put(ctx, req, q, "".join(text), sources, payload["coverage"])
     except Exception as e:
-        msg = str(e).lower()
-        put("error", {"error": "Claude credit is used up" if "credit" in msg or "billing" in msg
+        put("error", {"error": "Claude credit is used up" if brain.is_credit_error(e)
                       else f"answer failed: {str(e)[:200]}"})
     finally:
         with job["cond"]:
@@ -286,16 +383,20 @@ def ask(req: AskRequest, request: Request, x_brain_key: str = Header(None),
     blocked = _rate_limited(ip)
     if blocked:
         raise HTTPException(status_code=429, detail=blocked)
+    hit = _cache_get(ctx, req, q)
+    if hit:
+        return {"q": q, "empty": False, "answer": hit["answer"], "sources": hit["sources"],
+                "coverage": hit["coverage"], "cost_usd": 0.0, "cached": True}
     try:
         res = brain.answer_question(ctx, q, channels=req.channels, mode=req.mode, style=req.style, channel_names=req.channel_names, cand_max=req.cand_max, answer_max=req.answer_max)
     except Exception as e:
-        msg = str(e).lower()
-        if "credit" in msg or "billing" in msg:
+        if brain.is_credit_error(e):
             raise HTTPException(status_code=402, detail="Claude credit is used up")
         raise HTTPException(status_code=500, detail=f"answer failed: {str(e)[:200]}")
     if res["empty"]:
         return {"q": q, "empty": True, "answer": None, "sources": [], "coverage": res["coverage"]}
     brain.add_spend("claude", res["usd"], "web question")
-    return {"q": q, "empty": False, "answer": res["answer"],
-            "sources": _sources(ctx, res["candidates"], res["cited"]),
+    sources = _sources(ctx, res["candidates"], res["cited"])
+    _cache_put(ctx, req, q, res["answer"], sources, res["coverage"])
+    return {"q": q, "empty": False, "answer": res["answer"], "sources": sources,
             "coverage": res["coverage"], "cost_usd": round(res["usd"], 4)}

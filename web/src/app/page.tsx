@@ -50,6 +50,7 @@ type Answer = {
   sources: Source[];
   coverage: Coverage;
   cost_usd?: number;
+  cached?: boolean; // the brain served a saved answer to the same question: free, instant
   error?: string;
 };
 const EMPTY_COV: Coverage = { moments: 0, videos: 0, channels: 0 };
@@ -997,7 +998,7 @@ export default function Home() {
           else if (line.startsWith("data:")) data += line.slice(5).trim();
         }
         if (!data) continue; // keep-alive comment
-        let obj: { id?: string; stage?: string; text?: string; error?: string; coverage?: Coverage; cost_usd?: number } & Partial<Source>;
+        let obj: { id?: string; stage?: string; text?: string; error?: string; coverage?: Coverage; cost_usd?: number; cached?: boolean } & Partial<Source>;
         try {
           obj = JSON.parse(data);
         } catch {
@@ -1028,7 +1029,7 @@ export default function Home() {
           return "terminal";
         } else if (ev === "done") {
           clearPending();
-          finishAnswer(st, obj.coverage || EMPTY_COV, obj.cost_usd);
+          finishAnswer(st, obj.coverage || EMPTY_COV, obj.cost_usd, obj.cached);
           return "terminal";
         } else if (ev === "error") {
           // the answer itself failed (e.g. no Claude credit): show it, never re-run and re-charge
@@ -1042,8 +1043,8 @@ export default function Home() {
     }
   }
 
-  function finishAnswer(st: StreamState, coverage: Coverage, cost?: number) {
-    setResult({ q: st.text, empty: false, answer: st.acc, sources: st.srcs, coverage, cost_usd: cost });
+  function finishAnswer(st: StreamState, coverage: Coverage, cost?: number, cached?: boolean) {
+    setResult({ q: st.text, empty: false, answer: st.acc, sources: st.srcs, coverage, cost_usd: cost, cached });
     setStatus("done");
     setLive(false);
     setCurrentChatId(null);
@@ -2098,11 +2099,17 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number, e?
 
       {/* provenance + actual cost (clear, echoing the header pill) */}
       <div className="mt-7 flex flex-wrap items-center gap-x-3 gap-y-2 border-t border-line pt-4 text-[13px] text-faint">
-        {typeof result.cost_usd === "number" && (
+        {result.cached ? (
           <span className="inline-flex items-center rounded-full border border-gold/45 bg-gold/[0.06] px-2.5 py-1 font-medium text-gold2">
-            {t("answer.cost", { cost: aed(result.cost_usd) })}
-            <span className="mx-1.5 text-faint">· ${result.cost_usd.toFixed(2)}</span>
+            {t("answer.cached")}
           </span>
+        ) : (
+          typeof result.cost_usd === "number" && (
+            <span className="inline-flex items-center rounded-full border border-gold/45 bg-gold/[0.06] px-2.5 py-1 font-medium text-gold2">
+              {t("answer.cost", { cost: aed(result.cost_usd) })}
+              <span className="mx-1.5 text-faint">· ${result.cost_usd.toFixed(2)}</span>
+            </span>
+          )
         )}
         <span dir="auto">
           {t("answer.coverage", { moments: cov.moments.toLocaleString(), videos: cov.videos.toLocaleString() })}
