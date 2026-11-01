@@ -4097,6 +4097,10 @@ def _update(settings, unattended, only=None):
     #    partial tag batch goes off first, so Claude tags it while the index builds.
     if pump:
         pump.finish_submitting()
+    try:
+        auto_nest(settings)
+    except Exception as e:
+        warn(f"  (couldn't check for duplicate clips: {str(e)[:150]})")
     build_and_index(mapping, "Files and search index")
 
     def finish_retag():
@@ -4170,12 +4174,15 @@ def run_summary(channels, before, run_start, run_iso, left, fails):
     after = {k: v for k, v in read_obj(STATS_PATH).get("channels", {}).items() if isinstance(v, dict)}
     before = {k: v for k, v in (before or {}).items() if isinstance(v, dict)}
     head("Summary")
+    clips = nested_clip_ids()
     rows = []
     for ch in channels:
         a, b = after.get(ch["slug"], {}), before.get(ch["slug"], {})
         dv = a.get("videos", 0) - b.get("videos", 0) if b else 0
         dh = a.get("seconds", 0) - b.get("seconds", 0) if b else 0
+        dupes = len(raw_ids(ch) & clips) if clips else 0
         rows.append(f"  {channel_label(ch)[:26]:<26} {a.get('videos', 0):>6,} videos  {fmt_hours(a.get('seconds', 0)):>8}"
+                    + (f"  {D}{dupes:,} dupes hidden{X}" if dupes else "")
                     + (f"  {G}+{dv:,} new (+{fmt_hours(dh)}){X}" if dv > 0 else ""))
     for r in rows:
         say(r)
@@ -5265,8 +5272,39 @@ def apply_nests(groups):
             children[pv] = kids
             for kv in kids:
                 parent[kv] = pv
-    write_json(NESTS_PATH, {"children": children, "parent": parent})
+    # rewrite only on a real change: every index is fingerprinted on this file, so a needless
+    # rewrite would make the next build re-read every channel's chunks
+    old = read_obj(NESTS_PATH)
+    same = (old.get("parent") == parent and
+            {k: sorted(v) for k, v in (old.get("children") or {}).items()} == {k: sorted(v) for k, v in children.items()})
+    if not same:
+        write_json(NESTS_PATH, {"children": children, "parent": parent})
     return sum(len(v) for v in children.values())
+
+
+def auto_nest(settings):
+    """Update step, before the search index is built: find new duplicate / excerpt videos and nest
+    them, so re-uploads never reach search or the website. Free and local; fingerprints are cached,
+    so only newly downloaded transcripts are read. Off once nesting is removed from the menu (d)."""
+    if not settings.get("auto_nest", True):
+        return
+    channels = settings["channels"]
+    total = sum(len(raw_ids(ch)) for ch in channels)
+    prog = {"n": 0}
+
+    def pg():
+        prog["n"] += 1
+        if prog["n"] % 200 == 0 or prog["n"] >= total:
+            status(f"    checking for duplicate clips {bar(prog['n'], total, 18)}  {prog['n']:,}/{total:,}")
+
+    before = len(nested_clip_ids())
+    groups = find_duplicates(channels, progress=pg)
+    status_done()
+    n = apply_nests(groups)
+    if groups:
+        _write_dup_report(groups)
+    if n != before:
+        ok(f"  Duplicates: {n:,} {'copy' if n == 1 else 'copies'} hidden under their full video ({n - before:+,} this run).")
 
 
 def _write_dup_report(groups):
@@ -5302,6 +5340,9 @@ def duplicates_menu(settings):
     say("This scans every transcript for near-verbatim clips or excerpts of a longer video. It ignores\n"
         "shared Quran, hadith and stock phrases, so two different videos on the same topic are not flagged.\n"
         "It runs on your PC and costs nothing.")
+    say("Update " + ("does this automatically, so new duplicates are hidden before they reach search and the website."
+                     if settings.get("auto_nest", True) else
+                     f"{Y}is not hiding duplicates right now (nesting was removed). Scan here to turn it back on.{X}"))
     opts = [(1, "Scan for duplicate / excerpt videos")]
     if cur:
         opts.append((2, "Remove all nesting (show every video on its own again)"))
@@ -5311,7 +5352,9 @@ def duplicates_menu(settings):
     if k == "2":
         if NESTS_PATH.exists():
             NESTS_PATH.unlink()
-        ok("Nesting removed.")
+        settings["auto_nest"] = False  # or the next Update would nest them straight back
+        save_settings(settings)
+        ok("Nesting removed. Update won't hide duplicates again until you scan from here.")
         _refresh_app()
         return
     total = sum(len(list(cpaths(ch)["raw"].glob("*.json"))) for ch in settings["channels"] if cpaths(ch)["raw"].exists())
@@ -5342,7 +5385,10 @@ def duplicates_menu(settings):
     # one scan, then decide - the results are applied right here, no second scan needed
     if yes("\nNest these clips under their main videos? (reversible; the clip files are kept)"):
         n = apply_nests(groups)
+        settings["auto_nest"] = True
+        save_settings(settings)
         ok(f"Nested {plural(n, 'clip')}. They now appear under their main video, not on their own.")
+        say(f"{D}Search and the website drop them after the next Update and Publish.{X}")
         _refresh_app()
     else:
         say(f"{D}Left as is - nothing changed. The full list is in output\\duplicates_report.md.{X}")
@@ -5396,11 +5442,14 @@ def show_header(settings):
     if not settings["channels"]:
         say("  No channels yet. Add one with option 5.")
     else:
-        say(f"  {D}{'Channel':<24} {'Vids':>6} {'Lives':>5} {'Hours':>7} {'Tagged':>8} {'Err':>5} {'No-cap':>7}  Includes{X}")
-        tv = tl = tt = tnc = te = 0
+        say(f"  {D}{'Channel':<24} {'Vids':>6} {'Dupes':>5} {'Lives':>5} {'Hours':>7} {'Tagged':>8} {'Err':>5} {'No-cap':>7}  Includes{X}")
+        clips = nested_clip_ids()
+        tv = tl = tt = tnc = te = td = 0
         ts = 0.0
         for ch in settings["channels"]:
             raw, tagged, lives, nocaps, errors = channel_stats(ch)
+            dupes = len(raw_ids(ch) & clips) if clips else 0  # hidden under their full video, out of search
+            td += dupes
             st = stats.get(ch["slug"], {})
             secs = st.get("seconds", 0)
             tv, tl, tt, ts, tnc, te = tv + raw, tl + lives, tt + tagged, ts + secs, tnc + nocaps, te + errors
@@ -5412,13 +5461,17 @@ def show_header(settings):
             tag_col = f"{G}{tagged:>7,}✓{X}" if raw and tagged >= raw else f"{Y}{tagged:>8,}{X}"
             err_col = f"{R}{errors:>5,}{X}" if errors else f"{D}{'·':>5}{X}"
             nc_col = f"{D}{nocaps:>7,}{X}" if nocaps else f"{D}{'·':>7}{X}"
-            say(f"  {channel_label(ch)[:24]:<24} {raw:>6,} {lives:>5,} {fmt_hours(secs) if secs else '–':>7} "
+            dup_col = f"{D}{dupes:>5,}{X}" if dupes else f"{D}{'·':>5}{X}"
+            say(f"  {channel_label(ch)[:24]:<24} {raw:>6,} {dup_col} {lives:>5,} {fmt_hours(secs) if secs else '–':>7} "
                 f"{tag_col} {err_col} {nc_col}  {D}{opts}{lang}{X}{extra}")
         if len(settings["channels"]) > 1:
             say(f"  {D}{'─' * min(w - 2, 80)}{X}")
             tot_err = f"{R}{te:>5,}{X}" if te else f"{D}{'·':>5}{X}"
             tot_nc = f"{D}{tnc:>7,}{X}" if tnc else f"{D}{'·':>7}{X}"
-            say(f"  {B}{'Total':<24} {tv:>6,} {tl:>5,} {fmt_hours(ts) if ts else '–':>7} {tt:>8,}{X} {tot_err} {tot_nc}")
+            tot_dup = f"{D}{td:>5,}{X}" if td else f"{D}{'·':>5}{X}"
+            say(f"  {B}{'Total':<24} {tv:>6,}{X} {tot_dup} {B}{tl:>5,} {fmt_hours(ts) if ts else '–':>7} {tt:>8,}{X} {tot_err} {tot_nc}")
+            if td:
+                say(f"  {D}Dupes = re-uploads / clips of a longer video, hidden under it and left out of search.{X}")
     a, c, _ = balance_line()
     say(f"\n  {a}")
     say(f"  {c}")
@@ -5946,6 +5999,7 @@ def publish_data(settings):
     # Same file name as the live release asset, so replacing it keeps the download link valid.
     out = ROOT / "archive-data.tar.gz"
     added, missing = 0, []
+    clips = nested_clip_ids()
     say("Packaging the website's search data ...")
     t0 = time.time()
     gz = _ParallelGzip(out)
@@ -5961,8 +6015,21 @@ def publish_data(settings):
             # chunks.jsonl (only the local index build does) - so leave it out: it's ~1/4 of the
             # archive and pushed the extracted data past Railway's volume.
             if ch.get("search") != "keyword":
-                tar.add(chunks, arcname=f"{ch['slug']}/data/chunks.jsonl")
-            tar.add(p["search"], arcname=f"{ch['slug']}/search")
+                # nested duplicate clips are not in the search index, so the brain would only parse
+                # and drop them: ship the chunks without them (the local file keeps everything)
+                src, mine = chunks, raw_ids(ch) & clips
+                if mine:
+                    src = p["data"] / "chunks.publish.tmp"
+                    with open(chunks, encoding="utf-8") as fi, open(src, "w", encoding="utf-8", newline="") as fo:
+                        for line in fi:
+                            if line.strip() and json.loads(line).get("video_id") not in mine:
+                                fo.write(line)
+                try:
+                    tar.add(src, arcname=f"{ch['slug']}/data/chunks.jsonl")
+                finally:
+                    if src != chunks:
+                        src.unlink(missing_ok=True)
+            tar.add(p["search"], arcname=f"{ch['slug']}/search")  # its index already leaves the clips out
             added += 1
             say(f"  + {channel_label(ch)}")
         if QUOTE_DB.exists():  # which moments recite a verse / hadith, and those texts
