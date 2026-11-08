@@ -2072,12 +2072,16 @@ function StreamingAnswer({ text, question, onCite }: { text: string; question?: 
 }
 
 /* The cited evidences. Each streams in as the answer first references it. */
-function SourcesList({ sources }: { sources: Source[] }) {
+function SourcesList({ sources, actions }: { sources: Source[]; actions?: React.ReactNode }) {
   const { t } = useLang();
   if (!sources.length) return null;
   return (
     <div id="sources" className="mt-7">
-      <h3 className="mb-3 font-serif text-sm font-medium text-muted">{t("sources.title")}</h3>
+      {/* the heading shares its row with the download buttons (they wrap under it on a narrow phone) */}
+      <div className="mb-3 flex flex-wrap items-center justify-between gap-x-3 gap-y-2">
+        <h3 className="font-serif text-sm font-medium text-muted">{t("sources.title")}</h3>
+        {actions}
+      </div>
       <div className="space-y-2">
         {sources.map((s) => (
           <SourceCard key={s.n} s={s} />
@@ -2126,8 +2130,13 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number, e?
         </span>
       </div>
 
-      <SourcesList sources={result.sources} />
-      <DownloadAll result={result} />
+      {result.sources.length ? (
+        <SourcesList sources={result.sources} actions={<DownloadAll result={result} />} />
+      ) : (
+        <div className="mt-7">
+          <DownloadAll result={result} />
+        </div>
+      )}
     </div>
   );
 }
@@ -2191,14 +2200,14 @@ function DownloadAll({ result }: { result: Answer }) {
   }
 
   const btn =
-    "inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-[13px] text-muted transition hover:border-line2 hover:text-ink disabled:opacity-60";
+    "inline-flex items-center gap-1.5 rounded-lg border border-line px-2.5 py-1 text-xs text-muted transition hover:border-line2 hover:text-ink disabled:opacity-60";
   const icon = (
     <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
       <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
     </svg>
   );
   return (
-    <div className="mt-4 flex flex-wrap gap-2">
+    <div className="flex flex-wrap gap-1.5">
       {result.sources.length > 0 && (
         <button type="button" onClick={downloadCited} className={btn}>
           {icon}
