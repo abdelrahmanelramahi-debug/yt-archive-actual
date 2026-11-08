@@ -4439,9 +4439,18 @@ def render_answer(text):
 
 
 CAND_MAX = 500        # how many top moments to feed the deep-answer map-reduce per question
+MAP_MAX_TOKENS = 4000  # room for a batch's notes: at 1500 a busy batch was cut off mid-line (only what is written is billed)
 ANSWER_MAX_DEFAULT = 12000  # answer token ceiling when a mode/caller sets none (comprehensive answers)
 CUSTOM_MOMENTS_MAX = 10000  # admin "custom" depth ceiling (soft - the UI shows diminishing returns)
 CUSTOM_ANSWER_MAX = 32000   # answer-length ceiling, safely within the answer model's output limit
+# The answer model thinks before it writes, and thinking counts toward the same token limit: with no
+# headroom a 12k answer budget lost ~7.5k to thinking and long answers stopped mid-sentence.
+THINK_HEADROOM = 16000
+WRITER_MAX = 64000  # the model's output ceiling
+
+
+def writer_max_tokens(answer_max):
+    return min(WRITER_MAX, (answer_max or ANSWER_MAX_DEFAULT) + THINK_HEADROOM)
 
 # Depth presets for the website's mode picker. More candidates = more thorough, but pricier/slower.
 # `cand_max` = moments read in; `answer_max` = how long the written answer may get (tokens).
@@ -4477,6 +4486,7 @@ Write a COMPREHENSIVE, well-organised answer - a thorough briefing, not a summar
 - Attribute every point to the channel that said it (name the speaker too only when the finding makes it clear; don't invent names). Different channels and speakers may hold different views.
 - Do NOT flatten those differences: where they disagree, lay out each position distinctly under its own channel. Do not resolve the disagreement, harmonise them, pick a side, or add a ruling of your own. You are reporting what was said, not giving a fatwa.
 - If the findings genuinely don't answer the question, say so plainly. Don't fill gaps from outside knowledge.
+- Write only about what the channels said. NEVER mention the findings, excerpts, notes, numbering, truncation, missing citations or how the material was gathered (no "the finding does not say...", "his excerpt is truncated", "only what the findings support"). A point you can't attribute or cite is simply left out, silently.
 - {language}
 
 Question: {question}
@@ -4503,7 +4513,7 @@ Excerpts:
 
 MIDREDUCE_PROMPT = """Question: {q}
 
-Below are many findings distilled from transcript excerpts, each ending with its excerpt number like [3]. Condense them into a smaller, grouped set of points for the question — merge duplicates, but keep every distinct point AND its [n] citation numbers. No preamble.
+Below are many findings distilled from transcript excerpts. Each starts with its channel in parentheses and ends with its excerpt number like [3]. Condense them into fewer lines for the question: merge duplicates, but keep every distinct point. Every output line must keep the same shape - (ChannelName) the point [n, m] - with its channel first and ALL its citation numbers at the end; merge only points from the same channel. One point per line, no headings, no preamble.
 
 {findings}"""
 
@@ -4536,6 +4546,9 @@ def _numbered_excerpts(candidates):
             for n, c in enumerate(candidates, 1)]
 
 
+_CITE_RE = re.compile(r"\[\d+(?:\s*,\s*\d+)*\]")
+
+
 def _cited_numbers(text, upper):
     """The distinct [n] citation numbers appearing in `text`, in first-seen order, 1..upper."""
     out, seen = [], set()
@@ -4563,43 +4576,52 @@ def _reduce_prompt(q, candidates, findings, style, names, lang):
 def _map_findings(anth, settings, q, candidates):
     """The 'map' half of the deep answer: the cheap tag model distills the candidate excerpts into a
     compact findings block in parallel, condensing in a middle layer when there are too many. Returns
-    (findings_text, usd)."""
+    (findings_text, usd, relevant): relevant = the excerpt numbers the reader judged relevant to the
+    question (None when the set was small enough to skip the map step)."""
     numbered = _numbered_excerpts(candidates)
     cost = [0.0]
     lock = Lock()
 
     def cheap(prompt):
-        txt, u = call_claude(anth, settings["tag_model"], prompt, 1500)
+        txt, u = call_claude(anth, settings["tag_model"], prompt, MAP_MAX_TOKENS)
         with lock:
             cost[0] += u
         return txt
 
+    relevant = None
     if len(candidates) <= 40:
         findings = "\n\n".join(numbered)  # small set: let the answer model read the excerpts directly
     else:
         batches = [numbered[i:i + 25] for i in range(0, len(numbered), 25)]
         with ThreadPoolExecutor(max_workers=min(12, len(batches))) as ex:
             mapped = list(ex.map(lambda b: cheap(MAP_PROMPT.format(q=q, batch="\n\n".join(b))), batches))
+        # a note without its [n] is one that was cut off or malformed: drop it, so the writer never sees
+        # (and never comments on) a point it can't attribute
         lines = [ln for r in mapped if r and r.strip().upper() != "NONE"
-                 for ln in r.strip().splitlines() if ln.strip()]
+                 for ln in r.strip().splitlines() if _CITE_RE.search(ln)]
+        relevant = _cited_numbers("\n".join(lines), len(candidates))
         if len(lines) > 900:  # only for truly massive sets: condense in a middle layer first
             groups = [lines[i:i + 60] for i in range(0, len(lines), 60)]
             with ThreadPoolExecutor(max_workers=min(8, len(groups))) as ex:
                 cond = list(ex.map(lambda g: cheap(MIDREDUCE_PROMPT.format(q=q, findings="\n".join(g))), groups))
-            lines = [ln for r in cond if r and r.strip() for ln in r.strip().splitlines() if ln.strip()]
+            lines = [ln for r in cond if r and r.strip() for ln in r.strip().splitlines() if _CITE_RE.search(ln)]
         findings = "\n".join(lines) or "NONE"
-    return findings, cost[0]
+    return findings, cost[0], relevant
 
 
 def _deep_answer(anth, settings, q, candidates, lang, names, style=None, answer_max=None):
     """Hierarchical map-reduce: _map_findings distills many excerpts (map), then the answer model
     writes the cited answer (reduce) — topical synthesis, or verbatim quotes. `answer_max` caps the
-    written answer's length (tokens). Returns (answer, usd)."""
-    findings, cost = _map_findings(anth, settings, q, candidates)
-    answer, u = call_claude(anth, settings["answer_model"],
-                            _reduce_prompt(q, candidates, findings, style, names, lang),
-                            answer_max or ANSWER_MAX_DEFAULT)
-    return answer, cost + u
+    written answer's length (tokens). Returns (answer, usd, relevant)."""
+    findings, cost, relevant = _map_findings(anth, settings, q, candidates)
+    answer, u = "", 0.0
+    # streamed even here: the SDK refuses a long non-streamed request at this token limit
+    for kind, payload in call_claude_stream(anth, settings["answer_model"],
+                                            _reduce_prompt(q, candidates, findings, style, names, lang),
+                                            writer_max_tokens(answer_max)):
+        if kind == "done":
+            answer, u = payload
+    return answer, cost + u, relevant
 
 
 def searchable_channels(settings):
@@ -4803,11 +4825,12 @@ def synthesize(ctx, q, candidates, style=None, answer_max=None):
     """Write the cited answer from the candidate moments (the deep map-reduce). `answer_max` caps the
     written answer's length. Returns {answer, usd, cited, coverage}. Raises on a Claude error
     (callers handle credit/billing)."""
-    answer, usd = _deep_answer(ctx["anth"], ctx["settings"], q, candidates, ctx["lang"], ctx["names"], style, answer_max)
+    answer, usd, relevant = _deep_answer(ctx["anth"], ctx["settings"], q, candidates, ctx["lang"], ctx["names"], style, answer_max)
     cited = sorted({int(n) for grp in re.findall(r"\[(\d+(?:\s*,\s*\d+)*)\]", answer)
                     for n in re.findall(r"\d+", grp) if 0 < int(n) <= len(candidates)})
     cov_c = len({candidates[n - 1].get("channel") for n in cited}) or len(ctx["scope"])
     return {"answer": answer, "usd": usd, "cited": cited,
+            "relevant": relevant_refs(candidates, relevant if relevant is not None else cited),
             "coverage": {"moments": len(candidates),
                          "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}}
 
@@ -4874,7 +4897,7 @@ def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel
         return
     candidates = _apply_channel_names(ctx, q, candidates, channel_names)
     yield ("status", "reading")
-    findings, map_cost = _map_findings(ctx["anth"], ctx["settings"], q, candidates)
+    findings, map_cost, relevant = _map_findings(ctx["anth"], ctx["settings"], q, candidates)
     yield ("status", "writing")
     prompt = _reduce_prompt(q, candidates, findings, style, ctx["names"], ctx["lang"])
     answer, reduce_cost, emitted = "", 0.0, set()
@@ -4892,7 +4915,7 @@ def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel
                     yield ("source", source_json(ctx, candidates[n - 1], n))
 
     for kind, payload in call_claude_stream(ctx["anth"], ctx["settings"]["answer_model"], prompt,
-                                            amax or ANSWER_MAX_DEFAULT):
+                                            writer_max_tokens(amax)):
         if kind == "delta":
             yield ("delta", payload)
             answer += payload
@@ -4901,6 +4924,7 @@ def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel
     yield from new_sources(answer)  # sources stream in after the full answer (keeps the text smooth)
     cov_c = len({candidates[n - 1].get("channel") for n in sorted(emitted)}) or len(ctx["scope"])
     yield ("done", {"usd": map_cost + reduce_cost,
+                    "relevant": relevant_refs(candidates, relevant if relevant is not None else sorted(emitted)),
                     "coverage": {"moments": len(candidates),
                                  "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}})
 
@@ -5056,6 +5080,58 @@ def full_transcript(ctx, video_id, slug=None):
     items = [c for c in ctx.get("by_id", {}).values() if c.get("video_id") == video_id]
     items.sort(key=lambda c: c.get("n", 0))
     return [{"ts": c.get("timestamp"), "text": c.get("text", "")} for c in items]
+
+
+def relevant_refs(candidates, numbers):
+    """The moments the reader judged relevant to the question (excerpt numbers, 1-based), as compact
+    references {"c": chunk id, "s": channel slug} in reading order - small enough to send with the
+    answer and keep in a saved chat; moments_json turns them back into text for the download."""
+    out = []
+    for n in sorted(set(numbers or [])):
+        if 0 < n <= len(candidates):
+            c = candidates[n - 1]
+            out.append({"c": c.get("chunk_id"), "s": c.get("_slug") or ""})
+    return out
+
+
+def moments_json(ctx, refs):
+    """The text of each referenced moment (see relevant_refs), in order, for the website's
+    "download all relevant moments". Semantic moments are in memory; keyword ones come from their db."""
+    by_slug = {c["slug"]: c for c in ctx["scope"]}
+    kw_rows = {}
+    want = {}
+    for r in refs:
+        ch = by_slug.get(r.get("s") or "")
+        if ch is not None and ch.get("search") == "keyword":
+            want.setdefault(ch["slug"], []).append(r.get("c"))
+    for slug, cids in want.items():
+        ch, con = by_slug[slug], None
+        try:
+            con = kw_db(ch)
+            for i in range(0, len(cids), 500):
+                part = cids[i:i + 500]
+                q = ("SELECT chunk_id, title, date, ts, url, text FROM info "
+                     f"WHERE chunk_id IN ({','.join('?' * len(part))})")
+                for row in con.execute(q, part).fetchall():
+                    kw_rows[row[0]] = {"title": row[1], "channel": full_name(ch), "date": row[2],
+                                       "timestamp": row[3], "url": row[4], "text": row[5]}
+        except Exception:
+            pass
+        finally:
+            if con is not None:
+                con.close()
+    out = []
+    for r in refs:
+        cid = r.get("c")
+        m = kw_rows.get(cid)
+        if m is None:
+            c = ctx.get("by_id", {}).get(cid)
+            if c is not None:
+                m = {"title": c.get("title"), "channel": c.get("channel"), "date": c.get("date"),
+                     "timestamp": c.get("timestamp"), "url": c.get("url"), "text": c.get("text", "")}
+        if m is not None:
+            out.append(m)
+    return out
 
 
 def ask(settings):

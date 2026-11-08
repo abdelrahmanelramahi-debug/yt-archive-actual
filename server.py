@@ -233,7 +233,7 @@ def _cache_get(ctx, req, q):
         return None
 
 
-def _cache_put(ctx, req, q, answer, sources, coverage):
+def _cache_put(ctx, req, q, answer, sources, coverage, relevant=None):
     if not answer or not sources:  # only real, cited answers are worth reusing
         return
     try:
@@ -241,7 +241,8 @@ def _cache_put(ctx, req, q, answer, sources, coverage):
         try:
             con.execute("INSERT OR REPLACE INTO cache VALUES (?,?,?,?)",
                         (_cache_key(req, q), _cache_version(ctx), time.time(),
-                         json.dumps({"answer": answer, "sources": sources, "coverage": coverage}, ensure_ascii=False)))
+                         json.dumps({"answer": answer, "sources": sources, "coverage": coverage,
+                                    "relevant": relevant or []}, ensure_ascii=False)))
             # tidy: drop other versions and expired entries (cheap: the table stays small)
             con.execute("DELETE FROM cache WHERE ver != ? OR t < ?", (_cache_version(ctx), time.time() - CACHE_TTL))
             con.commit()
@@ -277,7 +278,8 @@ def _run_job(job, ctx, q, req):
             put("delta", {"text": hit["answer"]})
             for s in hit["sources"]:
                 put("source", s)
-            put("done", {"coverage": hit["coverage"], "cost_usd": 0.0, "cached": True})
+            put("done", {"coverage": hit["coverage"], "cost_usd": 0.0, "cached": True,
+                         "relevant": hit.get("relevant") or []})
             return
         text, sources = [], []
         for kind, payload in brain.answer_question_stream(ctx, q, channels=req.channels, mode=req.mode, style=req.style, channel_names=req.channel_names, cand_max=req.cand_max, answer_max=req.answer_max):
@@ -293,8 +295,9 @@ def _run_job(job, ctx, q, req):
                 put("empty", {})
             elif kind == "done":
                 brain.add_spend("claude", payload["usd"], "web question")
-                put("done", {"coverage": payload["coverage"], "cost_usd": round(payload["usd"], 4)})
-                _cache_put(ctx, req, q, "".join(text), sources, payload["coverage"])
+                put("done", {"coverage": payload["coverage"], "cost_usd": round(payload["usd"], 4),
+                             "relevant": payload.get("relevant") or []})
+                _cache_put(ctx, req, q, "".join(text), sources, payload["coverage"], payload.get("relevant"))
     except Exception as e:
         put("error", {"error": "Claude credit is used up" if brain.is_credit_error(e)
                       else f"answer failed: {str(e)[:200]}"})
@@ -386,7 +389,7 @@ def ask(req: AskRequest, request: Request, x_brain_key: str = Header(None),
     hit = _cache_get(ctx, req, q)
     if hit:
         return {"q": q, "empty": False, "answer": hit["answer"], "sources": hit["sources"],
-                "coverage": hit["coverage"], "cost_usd": 0.0, "cached": True}
+                "coverage": hit["coverage"], "cost_usd": 0.0, "cached": True, "relevant": hit.get("relevant") or []}
     try:
         res = brain.answer_question(ctx, q, channels=req.channels, mode=req.mode, style=req.style, channel_names=req.channel_names, cand_max=req.cand_max, answer_max=req.answer_max)
     except Exception as e:
@@ -397,6 +400,24 @@ def ask(req: AskRequest, request: Request, x_brain_key: str = Header(None),
         return {"q": q, "empty": True, "answer": None, "sources": [], "coverage": res["coverage"]}
     brain.add_spend("claude", res["usd"], "web question")
     sources = _sources(ctx, res["candidates"], res["cited"])
-    _cache_put(ctx, req, q, res["answer"], sources, res["coverage"])
+    _cache_put(ctx, req, q, res["answer"], sources, res["coverage"], res.get("relevant"))
     return {"q": q, "empty": False, "answer": res["answer"], "sources": sources,
-            "coverage": res["coverage"], "cost_usd": round(res["usd"], 4)}
+            "coverage": res["coverage"], "cost_usd": round(res["usd"], 4), "relevant": res.get("relevant") or []}
+
+
+MOMENTS_MAX = 5000  # refs per request: well above the deepest answer's relevant set
+
+
+class MomentsRequest(BaseModel):
+    refs: list[dict[str, str]]  # [{"c": chunk id, "s": channel slug}] from an answer's "relevant"
+
+
+@app.post("/moments")
+def moments(req: MomentsRequest, x_brain_key: str = Header(None)):
+    """The text of an answer's relevant moments (cited or not), for the website's "download all
+    relevant moments". Stored captions only - no Claude call, no spend."""
+    _check_key(x_brain_key)
+    ctx = _ctx()
+    refs = [r for r in req.refs[:MOMENTS_MAX] if isinstance(r.get("c"), str)]
+    return {"moments": brain.moments_json(ctx, refs)}
+

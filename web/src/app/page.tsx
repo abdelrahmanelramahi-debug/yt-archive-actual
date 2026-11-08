@@ -12,7 +12,7 @@ const DAILY_CAP = 20; // free answers per user per day (keep in sync with the se
 const GUEST_CAP = 2; // free questions for a guest (anonymous) before they're asked to sign up
 
 // one saved question+answer in the user's history (sources stored light — no transcript windows)
-type ChatDoc = { id: string; q: string; answer: string; sources: Source[]; coverage: Coverage; cost_usd?: number | null; style?: string };
+type ChatDoc = { id: string; q: string; answer: string; sources: Source[]; coverage: Coverage; cost_usd?: number | null; style?: string; relevant?: Ref[] };
 
 type Line = { ts: string | null; text: string };
 type Source = {
@@ -43,6 +43,9 @@ type Quote =
       also?: { book_en: string; book_ar: string; num: string }[];
     };
 type Coverage = { moments: number; videos: number; channels: number };
+// a moment the reader judged relevant to the question (cited or not): its chunk id + channel slug
+type Ref = { c: string; s: string };
+type Moment = { title: string; channel: string | null; date: string | null; timestamp: string; url: string; text: string };
 type Answer = {
   q: string;
   empty?: boolean;
@@ -51,6 +54,7 @@ type Answer = {
   coverage: Coverage;
   cost_usd?: number;
   cached?: boolean; // the brain served a saved answer to the same question: free, instant
+  relevant?: Ref[]; // every moment that addresses the question, for "download all relevant moments"
   error?: string;
 };
 const EMPTY_COV: Coverage = { moments: 0, videos: 0, channels: 0 };
@@ -732,7 +736,7 @@ export default function Home() {
   }, [user]);
 
   // save one answered question to history; load / delete past ones from the sidebar
-  async function saveChat(q: string, answer: string | null, sources: Source[], coverage: Coverage, cost?: number) {
+  async function saveChat(q: string, answer: string | null, sources: Source[], coverage: Coverage, cost?: number, relevant?: Ref[]) {
     if (!user || !answer) return;
     try {
       await addDoc(collection(db, "users", user.uid, "chats"), {
@@ -757,6 +761,8 @@ export default function Home() {
         })),
         coverage,
         cost_usd: cost ?? null,
+        // the relevant moments as compact refs (~50 bytes each), so a reopened chat can still download them
+        relevant: (relevant ?? []).map((r) => ({ c: r.c, s: r.s })),
         // the style the answer was actually asked in (`style`); answerStyle is the displayed copy and
         // lags a render behind when saving right after asking, so it would save the wrong style.
         style,
@@ -770,7 +776,7 @@ export default function Home() {
   function openChat(c: ChatDoc) {
     setAsked(c.q);
     setAnswerStyle(c.style === "verbatim" ? "verbatim" : "topical");
-    setResult({ q: c.q, empty: false, answer: c.answer, sources: c.sources || [], coverage: c.coverage, cost_usd: c.cost_usd ?? undefined });
+    setResult({ q: c.q, empty: false, answer: c.answer, sources: c.sources || [], coverage: c.coverage, cost_usd: c.cost_usd ?? undefined, relevant: c.relevant });
     setStatus("done");
     setStreamText("");
     setError("");
@@ -878,7 +884,7 @@ export default function Home() {
       setResult(data);
       setStatus("done");
       setCurrentChatId(null);
-      saveChat(text, data.answer, data.sources || [], data.coverage, data.cost_usd);
+      saveChat(text, data.answer, data.sources || [], data.coverage, data.cost_usd, data.relevant);
     } catch {
       setError(t("err.server"));
       setStatus("error");
@@ -998,7 +1004,7 @@ export default function Home() {
           else if (line.startsWith("data:")) data += line.slice(5).trim();
         }
         if (!data) continue; // keep-alive comment
-        let obj: { id?: string; stage?: string; text?: string; error?: string; coverage?: Coverage; cost_usd?: number; cached?: boolean } & Partial<Source>;
+        let obj: { id?: string; stage?: string; text?: string; error?: string; coverage?: Coverage; cost_usd?: number; cached?: boolean; relevant?: Ref[] } & Partial<Source>;
         try {
           obj = JSON.parse(data);
         } catch {
@@ -1029,7 +1035,7 @@ export default function Home() {
           return "terminal";
         } else if (ev === "done") {
           clearPending();
-          finishAnswer(st, obj.coverage || EMPTY_COV, obj.cost_usd, obj.cached);
+          finishAnswer(st, obj.coverage || EMPTY_COV, obj.cost_usd, obj.cached, obj.relevant);
           return "terminal";
         } else if (ev === "error") {
           // the answer itself failed (e.g. no Claude credit): show it, never re-run and re-charge
@@ -1043,12 +1049,12 @@ export default function Home() {
     }
   }
 
-  function finishAnswer(st: StreamState, coverage: Coverage, cost?: number, cached?: boolean) {
-    setResult({ q: st.text, empty: false, answer: st.acc, sources: st.srcs, coverage, cost_usd: cost, cached });
+  function finishAnswer(st: StreamState, coverage: Coverage, cost?: number, cached?: boolean, relevant?: Ref[]) {
+    setResult({ q: st.text, empty: false, answer: st.acc, sources: st.srcs, coverage, cost_usd: cost, cached, relevant });
     setStatus("done");
     setLive(false);
     setCurrentChatId(null);
-    saveChat(st.text, st.acc, st.srcs, coverage, cost);
+    saveChat(st.text, st.acc, st.srcs, coverage, cost, relevant);
   }
 
   // An answer still being written when the page was closed or reloaded (a phone does this to
@@ -2121,6 +2127,96 @@ function AnswerView({ result, onCite }: { result: Answer; onCite: (n: number, e?
       </div>
 
       <SourcesList sources={result.sources} />
+      <DownloadAll result={result} />
+    </div>
+  );
+}
+
+/* Save text as a .txt download, named after the question. */
+function saveText(name: string, text: string) {
+  const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `${name.replace(/[\\/:*?"<>|\n\r]+/g, " ").replace(/\s+/g, " ").trim().slice(0, 100) || "La Tafti"}.txt`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+/* Two downloads under the sources: (1) the relevant spot of every cited source - the transcript
+   window around the moment, already on the page; (2) every moment the reader judged relevant to the
+   question, cited or not - fetched from the brain (stored captions only, no spend). */
+function DownloadAll({ result }: { result: Answer }) {
+  const { t } = useLang();
+  const [state, setState] = useState<"idle" | "loading" | "error">("idle");
+  const rel = result.relevant ?? [];
+  if (!result.sources.length && !rel.length) return null;
+
+  function downloadCited() {
+    const parts = result.sources.map((s) => {
+      const head = [`[${s.n}] ${s.title || ""}`, [s.channel, s.date, s.timestamp].filter(Boolean).join(" · "), s.url]
+        .filter(Boolean)
+        .join("\n");
+      const lines = (s.context ?? []).map((l) => (l.ts ? `[${l.ts}] ${l.text}` : l.text)).join("\n");
+      return `${head}\n${lines}`;
+    });
+    saveText(`${result.q} - ${t("dl.citedFile")}`, `${result.q}\n\n${parts.join("\n\n----------\n\n")}\n`);
+  }
+
+  async function downloadRelevant() {
+    if (state === "loading" || !rel.length) return;
+    setState("loading");
+    try {
+      const token = await idToken();
+      const r = await fetch("/api/moments", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", ...(token ? { Authorization: `Bearer ${token}` } : {}) },
+        body: JSON.stringify({ refs: rel }),
+      });
+      const data = await r.json().catch(() => ({}));
+      const ms: Moment[] = Array.isArray(data?.moments) ? data.moments : [];
+      if (!r.ok || !ms.length) throw new Error("none");
+      const parts = ms.map((m, i) =>
+        [`[${i + 1}] ${m.title || ""}`, [m.channel, m.date, m.timestamp].filter(Boolean).join(" · "), m.url, m.text]
+          .filter(Boolean)
+          .join("\n"),
+      );
+      saveText(`${result.q} - ${t("dl.relevantFile")}`, `${result.q}\n\n${parts.join("\n\n----------\n\n")}\n`);
+      setState("idle");
+    } catch {
+      setState("error");
+      setTimeout(() => setState("idle"), 2500);
+    }
+  }
+
+  const btn =
+    "inline-flex items-center gap-1.5 rounded-lg border border-line px-3 py-2 text-[13px] text-muted transition hover:border-line2 hover:text-ink disabled:opacity-60";
+  const icon = (
+    <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden>
+      <path d="M12 3v12m0 0 4-4m-4 4-4-4M5 19h14" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round" />
+    </svg>
+  );
+  return (
+    <div className="mt-4 flex flex-wrap gap-2">
+      {result.sources.length > 0 && (
+        <button type="button" onClick={downloadCited} className={btn}>
+          {icon}
+          {t("dl.cited", { n: result.sources.length })}
+        </button>
+      )}
+      {rel.length > 0 && (
+        <button type="button" onClick={downloadRelevant} disabled={state === "loading"} className={btn}>
+          {state === "loading" ? (
+            <svg width="14" height="14" viewBox="0 0 24 24" fill="none" aria-hidden className="animate-spin">
+              <path d="M12 3a9 9 0 1 0 9 9" stroke="currentColor" strokeWidth="2" strokeLinecap="round" />
+            </svg>
+          ) : (
+            icon
+          )}
+          {state === "error" ? t("dl.error") : t("dl.relevant", { n: rel.length })}
+        </button>
+      )}
     </div>
   );
 }
