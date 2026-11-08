@@ -4511,6 +4511,19 @@ Excerpts:
 {quotes}"""
 
 
+ADDON_PROMPT = """You are adding to an answer that reports what YouTube channels say. The answer already covers other channels; these channels were left out. Using ONLY the findings below, write a section for each of these channels that genuinely addresses the question. Each finding starts with its channel and ends with its excerpt number, like [3]. The captions are auto-generated, so names and Arabic terms can be garbled.
+- Give each channel its own heading on its own line, prefixed with "## " (the channel's name), then its relevant points as short bullets.
+- Put the excerpt number in square brackets after every claim, like [3] or [3, 7]. Only cite numbers that actually support the claim.
+- If a channel's findings only touch the topic without answering the question, leave that channel out entirely - silently. If none of them answer it, reply with exactly: NONE
+- Report what was said; no ruling of your own, no harmonising of different views. No introduction, no conclusion, and never mention the findings, excerpts or how the material was gathered.
+- {language}
+
+Question: {question}
+
+Findings:
+{findings}"""
+
+
 MIDREDUCE_PROMPT = """Question: {q}
 
 Below are many findings distilled from transcript excerpts. Each starts with its channel in parentheses and ends with its excerpt number like [3]. Condense them into fewer lines for the question: merge duplicates, but keep every distinct point. Every output line must keep the same shape - (ChannelName) the point [n, m] - with its channel first and ALL its citation numbers at the end; merge only points from the same channel. One point per line, no headings, no preamble.
@@ -4609,6 +4622,45 @@ def _map_findings(anth, settings, q, candidates):
     return findings, cost[0], relevant
 
 
+ADDON_ANSWER_MAX = 6000  # length budget for the add-on sections (short: a few points per channel)
+
+
+def _missed_channels_stream(anth, settings, q, candidates, findings, answer, lang, style):
+    """The writer favours channels with a lot to say and can drop ones with only a few relevant
+    moments. Find channels the reader judged relevant (they have notes) that the answer never cites,
+    and stream short sections for them - only where their notes actually answer the question (the
+    prompt drops tangential ones). Yields ('delta', text) then ('done', (text, usd)); yields nothing
+    when no channel was missed (or for the verbatim style, which quotes every relevant excerpt)."""
+    if style == "verbatim" or not findings or findings == "NONE":
+        return
+    chan = lambda n: (candidates[n - 1].get("channel") or "") if 0 < n <= len(candidates) else ""
+    covered = {chan(n) for n in _cited_numbers(answer, len(candidates))}
+    missing_lines = []
+    for ln in findings.splitlines():
+        nums = _cited_numbers(ln, len(candidates))
+        if nums and chan(nums[0]) and chan(nums[0]) not in covered:
+            missing_lines.append(ln)
+    if not missing_lines:
+        return
+    prompt = ADDON_PROMPT.format(language=lang, question=q, findings="\n".join(missing_lines))
+    text, usd, started = "", 0.0, False
+    for kind, payload in call_claude_stream(anth, settings["answer_model"], prompt, writer_max_tokens(ADDON_ANSWER_MAX)):
+        if kind == "delta":
+            text += payload
+            # hold back until it's clearly not a bare "NONE", then stream as usual
+            if not started and len(text.strip()) > 8:
+                started = True
+                yield ("delta", "\n\n" + text)
+            elif started:
+                yield ("delta", payload)
+        else:
+            text, usd = payload
+    if not started and text.strip() and text.strip().upper() != "NONE":
+        yield ("delta", "\n\n" + text)
+        started = True
+    yield ("done", ("\n\n" + text if started else "", usd))
+
+
 def _deep_answer(anth, settings, q, candidates, lang, names, style=None, answer_max=None):
     """Hierarchical map-reduce: _map_findings distills many excerpts (map), then the answer model
     writes the cited answer (reduce) — topical synthesis, or verbatim quotes. `answer_max` caps the
@@ -4621,6 +4673,10 @@ def _deep_answer(anth, settings, q, candidates, lang, names, style=None, answer_
                                             writer_max_tokens(answer_max)):
         if kind == "done":
             answer, u = payload
+    for kind, payload in _missed_channels_stream(anth, settings, q, candidates, findings, answer, lang, style):
+        if kind == "done":
+            answer += payload[0]
+            u += payload[1]
     return answer, cost + u, relevant
 
 
@@ -4921,6 +4977,13 @@ def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel
             answer += payload
         else:  # ('done', (full_text, usd))
             answer, reduce_cost = payload
+    for kind, payload in _missed_channels_stream(ctx["anth"], ctx["settings"], q, candidates, findings,
+                                                 answer, ctx["lang"], style):
+        if kind == "delta":
+            yield ("delta", payload)
+        else:
+            answer += payload[0]
+            reduce_cost += payload[1]
     yield from new_sources(answer)  # sources stream in after the full answer (keeps the text smooth)
     cov_c = len({candidates[n - 1].get("channel") for n in sorted(emitted)}) or len(ctx["scope"])
     yield ("done", {"usd": map_cost + reduce_cost,
