@@ -24,7 +24,8 @@ const plexArabic = IBM_Plex_Sans_Arabic({
 });
 
 export const metadata: Metadata = {
-  title: "La Tafti · لا تفتي",
+  title: "La Tafti",
+  appleWebApp: { title: "La Tafti" }, // the name under the home-screen icon
   description:
     "Not a fatwa — the words of the scholars themselves, traced to the moment they were said. Ask across thousands of hours of lectures and debates, with timestamps.",
 };

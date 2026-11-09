@@ -89,7 +89,7 @@ export default function SignIn() {
         <LangToggle />
       </div>
       <div className="fade-up">
-        <span className="logo-mark" role="img" aria-label="La Tafti · لا تفتي" />
+        <span className="logo-mark" role="img" aria-label="La Tafti" />
         <h1 dir="auto" className="mt-6 font-serif text-[1.7rem] font-medium leading-tight text-ink">
           {mode === "up" ? t("signin.createTitle") : t("signin.welcome")}
         </h1>

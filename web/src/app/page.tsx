@@ -161,7 +161,7 @@ const STAGE_IDX: Record<string, number> = { searching: 1, reading: 2, writing: 3
 
 // La Tifti wordmark — the uploaded logo, recoloured per theme via a CSS mask.
 function Wordmark() {
-  return <span className="logo-mark shrink-0" role="img" aria-label="La Tafti · لا تفتي" />;
+  return <span className="logo-mark shrink-0" role="img" aria-label="La Tafti" />;
 }
 
 const THEMES = [
