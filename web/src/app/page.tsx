@@ -145,7 +145,7 @@ function heroVideos(n: number): string {
 }
 function heroMoments(n: number): string {
   if (n >= 1_000_000) {
-    const m = Math.round(n / 100_000) / 10; // headline figure, to the nearest 100k (e.g. 1.1M)
+    const m = Math.floor(n / 100_000) / 10; // headline figure, floored to 100k (e.g. 1.98M -> 1.9M+)
     return (Number.isInteger(m) ? m.toString() : m.toFixed(1)) + "M+";
   }
   if (n >= 1000) return Math.round(n / 1000).toLocaleString() + "K+";
@@ -417,7 +417,7 @@ function ChannelPicker({
 
 // Compact depth selector holding the depths, their cost, and the explainer. Opens up above the ask
 // bar on the phone landing; opens down once the controls sit at the top (after a question is asked).
-function ModeDropup({ modes, mode, onChange, dropUp = true }: { modes: Mode[]; mode: string; onChange: (id: string) => void; dropUp?: boolean }) {
+function ModeDropup({ modes, mode, onChange, dropUp = true, moments }: { modes: Mode[]; mode: string; onChange: (id: string) => void; dropUp?: boolean; moments?: string }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const current = modes.find((m) => m.id === mode);
@@ -473,7 +473,7 @@ function ModeDropup({ modes, mode, onChange, dropUp = true }: { modes: Mode[]; m
             </button>
           ))}
           <p className="mt-1.5 border-t border-line px-2.5 pt-2 text-[12px] leading-relaxed text-muted">
-            Every depth searches <strong className="font-semibold text-ink">every moment</strong> — it only
+            Every depth searches <strong className="font-semibold text-ink">{moments ? `all ${moments} moments` : "every moment"}</strong> — it only
             changes how many of the best it keeps.
           </p>
         </div>
@@ -493,7 +493,7 @@ function Stat({ n, label }: { n: string; label: string }) {
 }
 
 // Collapsible explainer for the depth modes, under the picker.
-function ModeExplainer({ modes }: { modes: Mode[] }) {
+function ModeExplainer({ modes, moments }: { modes: Mode[]; moments?: string }) {
   const [open, setOpen] = useState(false);
   if (!modes.length) return null;
   const keeps: Record<string, string> = { quick: "~120", standard: "~500", deep: "~1,000", custom: "you set" };
@@ -519,7 +519,7 @@ function ModeExplainer({ modes }: { modes: Mode[] }) {
       {open && (
         <div className="fade-up mt-2 max-w-md rounded-xl border border-line bg-raised/60 p-3.5 text-[13px] leading-relaxed">
           <p className="text-ink">
-            Every depth searches <strong className="font-semibold">every moment</strong> — it only changes how
+            Every depth searches <strong className="font-semibold">{moments ? `all ${moments} moments` : "every moment"}</strong> — it only changes how
             many of the best it keeps, so the obscure finds surface either way.
           </p>
           <div className="mt-2.5 space-y-1.5">
@@ -1131,6 +1131,8 @@ export default function Home() {
   }, [citeToast]);
   const landing = status === "idle";
   const noneSelected = channels.length > 0 && selected.size === 0;
+  // this account's searchable moments (only the channels it can see), for the depth and loading copy
+  const momentsLabel = totals ? heroMoments(totals.moments) : undefined;
   // admins get a 4th "Custom" depth whose cost tracks the dials; everyone else sees the server's modes
   const customUsd = estimateCost(customMoments, customTokens);
   const displayModes: Mode[] = isAdmin ? [...modes, { id: "custom", label: t("mode.custom"), usd: customUsd }] : modes;
@@ -1242,7 +1244,7 @@ export default function Home() {
               <div className={`mb-4 flex items-center justify-end gap-2 ${landing ? "sm:hidden" : ""}`}>
                 <StyleToggle value={style} onChange={setStyle} />
                 <ChannelPicker channels={channels} selected={selected} onChange={setSelected} compact dropUp={landing} />
-                <ModeDropup modes={displayModes} mode={mode} onChange={setMode} dropUp={landing} />
+                <ModeDropup modes={displayModes} mode={mode} onChange={setMode} dropUp={landing} moments={momentsLabel} />
                 {noneSelected && <span className="text-[13px] text-danger">{t("controls.pickChannel")}</span>}
               </div>
 
@@ -1259,7 +1261,7 @@ export default function Home() {
                   <ChannelPicker channels={channels} selected={selected} onChange={setSelected} />
                 </div>
                 <div className="flex flex-col items-end gap-2">
-                  <ModeExplainer modes={displayModes} />
+                  <ModeExplainer modes={displayModes} moments={momentsLabel} />
                   <p className="text-[13px] text-gold2">{t("controls.perAnswer", { price: aed(modeUsd) })}</p>
                   <div className="flex items-center gap-2">
                     <StyleToggle value={style} onChange={setStyle} />
@@ -1360,7 +1362,7 @@ export default function Home() {
             ) : null}
           </div>
 
-          {status === "loading" && <Loading stage={stage} />}
+          {status === "loading" && <Loading stage={stage} moments={momentsLabel} />}
 
           {status === "streaming" && (
             <StreamingAnswer text={streamText} question={asked ?? undefined} onCite={scrollToSource} />
@@ -2043,12 +2045,14 @@ function GuestPrompt({ onClose }: { onClose: () => void }) {
   );
 }
 
-function Loading({ stage }: { stage: number }) {
+function Loading({ stage, moments }: { stage: number; moments?: string }) {
   const { t } = useLang();
+  // "Searching 1.9M+ moments" with this account's own total, once known
+  const key = STAGE_KEYS[stage] === "stage.2" && moments ? "stage.2n" : STAGE_KEYS[stage];
   return (
     <div className="fade-up mt-6">
       <div className="relative h-0.5 w-full overflow-hidden rounded-full bg-line sweep" />
-      <p className="mt-4 text-sm text-muted">{t(STAGE_KEYS[stage])}…</p>
+      <p className="mt-4 text-sm text-muted">{t(key, { n: moments ?? "" })}…</p>
       <p className="mt-1 text-xs text-faint">{t("loading.note")}</p>
     </div>
   );

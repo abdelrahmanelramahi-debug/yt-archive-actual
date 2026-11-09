@@ -32,6 +32,7 @@ const DICT: Record<Lang, Record<string, string>> = {
 
     "stage.1": "Breaking your question into angles",
     "stage.2": "Searching every moment",
+    "stage.2n": "Searching {n} moments",
     "stage.3": "Reading the most relevant ones",
     "stage.4": "Writing a grounded answer",
     "loading.note": "A thorough answer takes a few moments.",
@@ -221,6 +222,7 @@ const DICT: Record<Lang, Record<string, string>> = {
 
     "stage.1": "نُحلّل سؤالك إلى زوايا",
     "stage.2": "نبحث في كل اللحظات",
+    "stage.2n": "نبحث في {n} لحظة",
     "stage.3": "نقرأ أكثرها صلة",
     "stage.4": "نكتب إجابةً موثّقة",
     "loading.note": "الإجابة الدقيقة تستغرق لحظات.",
