@@ -153,7 +153,7 @@ function heroMoments(n: number): string {
 }
 
 // keys into the i18n dictionary — the shown + asked text follows the interface language
-const EX_KEYS = ["ex.1", "ex.2"];
+const EX_KEYS = ["ex.1", "ex.2", "ex.3"];
 
 const STAGE_KEYS = ["stage.1", "stage.2", "stage.3", "stage.4"];
 // map the brain's streaming status events onto the stage copy above
