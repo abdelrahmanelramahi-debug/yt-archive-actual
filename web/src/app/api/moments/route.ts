@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyIdToken } from "../../../lib/firebase-admin";
+import { allowedChannels } from "../../../lib/channels";
 
 // Server-side only: fetch the text of an answer's relevant moments (cited or not) from the brain, for
 // the "download all relevant moments" button. Stored captions only, so no spend and no daily allowance.
@@ -27,11 +28,21 @@ export async function POST(req: NextRequest) {
     .map((r) => ({ c: r.c.slice(0, 200), s: r.s.slice(0, 200) }));
   if (!refs.length) return NextResponse.json({ moments: [] });
 
+  // hidden channels stay hidden here too: the brain drops moments outside this account's channels
+  let channels: string[] | undefined;
+  try {
+    const a = await allowedChannels(!!auth.admin, undefined, auth.uid);
+    if (a.blocked) return NextResponse.json({ moments: [] });
+    channels = a.channels;
+  } catch {
+    return NextResponse.json({ error: "Could not load the moments." }, { status: 503 });
+  }
+
   try {
     const r = await fetch(`${BRAIN_URL}/moments`, {
       method: "POST",
       headers: { "Content-Type": "application/json", ...(BRAIN_KEY ? { "X-Brain-Key": BRAIN_KEY } : {}) },
-      body: JSON.stringify({ refs }),
+      body: JSON.stringify(channels ? { refs, channels } : { refs }),
       cache: "no-store",
     });
     const data = await r.json().catch(() => ({ moments: [] }));

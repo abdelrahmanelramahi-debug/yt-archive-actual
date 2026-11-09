@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyIdToken } from "../../../lib/firebase-admin";
+import { allowedChannels } from "../../../lib/channels";
 
 // Server-side only: fetch one source video's full transcript from the brain for the download button.
 // Any signed-in visitor (guests included) may download; the brain reads only its stored captions.
@@ -16,6 +17,14 @@ export async function GET(req: NextRequest) {
 
   const qs = new URLSearchParams({ video_id: videoId });
   if (slug) qs.set("slug", slug);
+  // hidden channels stay hidden here too: the brain returns nothing for a video outside this account's channels
+  try {
+    const a = await allowedChannels(!!auth.admin, undefined, auth.uid);
+    if (a.blocked) return NextResponse.json({ video_id: videoId, lines: [] });
+    if (a.channels) qs.set("channels", a.channels.join(","));
+  } catch {
+    return NextResponse.json({ error: "Could not load transcript." }, { status: 503 });
+  }
   try {
     const r = await fetch(`${BRAIN_URL}/transcript?${qs}`, {
       headers: { ...(BRAIN_KEY ? { "X-Brain-Key": BRAIN_KEY } : {}) },

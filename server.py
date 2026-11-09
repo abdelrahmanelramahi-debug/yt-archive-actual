@@ -136,12 +136,14 @@ def search(q: str = Query(..., min_length=1), k: int = 20, x_brain_key: str = He
 
 @app.get("/transcript")
 def transcript(video_id: str = Query(..., min_length=1), slug: str = Query(None),
-               x_brain_key: str = Header(None)):
+               channels: str = Query(None), x_brain_key: str = Header(None)):
     """The full transcript of one source video (ordered [{ts, text}]) for the website's per-source
     download button. No Claude call - just the stored captions - so no spend and no rate limit."""
     _check_key(x_brain_key)
     ctx = _ctx()
-    return {"video_id": video_id, "lines": brain.full_transcript(ctx, video_id, slug)}
+    # channels: comma-separated slugs this account may see (the website sends it when some are hidden)
+    allowed = set(filter(None, channels.split(","))) if channels is not None else None
+    return {"video_id": video_id, "lines": brain.full_transcript(ctx, video_id, slug, allowed)}
 
 
 @app.get("/channels")
@@ -410,6 +412,7 @@ MOMENTS_MAX = 5000  # refs per request: well above the deepest answer's relevant
 
 class MomentsRequest(BaseModel):
     refs: list[dict[str, str]]  # [{"c": chunk id, "s": channel slug}] from an answer's "relevant"
+    channels: list[str] | None = None  # slugs this account may see; None = all (no hidden channels)
 
 
 @app.post("/moments")
@@ -419,5 +422,6 @@ def moments(req: MomentsRequest, x_brain_key: str = Header(None)):
     _check_key(x_brain_key)
     ctx = _ctx()
     refs = [r for r in req.refs[:MOMENTS_MAX] if isinstance(r.get("c"), str)]
-    return {"moments": brain.moments_json(ctx, refs)}
+    allowed = set(req.channels) if req.channels is not None else None
+    return {"moments": brain.moments_json(ctx, refs, allowed)}
 

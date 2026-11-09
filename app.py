@@ -194,7 +194,8 @@ def fmt_eta(sec):
     return f"~{sec // 3600} h {sec % 3600 // 60} min left"
 
 
-_SECRET_ENV = ("APIFY_TOKEN", "ANTHROPIC_API_KEY", "YOUTUBE_API_KEY", "GITHUB_TOKEN", "BRAIN_KEY")
+_SECRET_ENV = ("APIFY_TOKEN", "ANTHROPIC_API_KEY", "ANTHROPIC_TAG_API_KEY", "YOUTUBE_API_KEY", "GITHUB_TOKEN",
+               "BRAIN_KEY")
 
 
 def _redact(text):
@@ -1288,7 +1289,6 @@ def download_many(client, jobs, on_saved=None, status_fn=None, feed=None):
     on_saved(ch, [video ids]) is called as each batch lands (the tagging belt picks them up from there).
     feed: an optional Queue that yields more (channel, videos) tuples as channels finish listing, then
     None when listing is done (overnight mode, so downloading overlaps listing). Returns {slug: saved}."""
-    global PARALLEL_BATCHES
     ctx = {}
     for ch, todo in jobs:
         cpaths(ch)["raw"].mkdir(parents=True, exist_ok=True)
@@ -5123,13 +5123,14 @@ def quote_json(ctx, chunk_id):
         con.close()
 
 
-def full_transcript(ctx, video_id, slug=None):
+def full_transcript(ctx, video_id, slug=None, allowed=None):
     """Every transcript segment of one source video, in time order, as [{ts, text}] - for the
     website's per-source transcript download. Keyword channels are read from their FTS db; semantic
-    moments are already in memory. Returns [] if the video isn't in the loaded scope."""
+    moments are already in memory. Returns [] if the video isn't in the loaded scope. `allowed` (a set
+    of slugs, None = all) keeps an account to the channels it may see - hidden ones return []."""
     if not video_id:
         return []
-    if slug:  # keyword channel: read the whole video straight from its FTS db
+    if slug and (allowed is None or slug in allowed):  # keyword channel: read the whole video straight from its FTS db
         ch = next((c for c in ctx["scope"]
                    if c.get("slug") == slug and c.get("search") == "keyword"), None)
         if ch is not None:
@@ -5147,7 +5148,8 @@ def full_transcript(ctx, video_id, slug=None):
                 return [{"ts": r[0], "text": r[1]} for r in rows]
             # nothing in the keyword db: fall through to the in-memory scan as a safety net
     # semantic channel: the video's chunks share its id with adjacent indices (chunk_id = vid_NNNN)
-    items = [c for c in ctx.get("by_id", {}).values() if c.get("video_id") == video_id]
+    items = [c for c in ctx.get("by_id", {}).values()
+             if c.get("video_id") == video_id and (allowed is None or c.get("_slug") in allowed)]
     items.sort(key=lambda c: c.get("n", 0))
     return [{"ts": c.get("timestamp"), "text": c.get("text", "")} for c in items]
 
@@ -5164,9 +5166,13 @@ def relevant_refs(candidates, numbers):
     return out
 
 
-def moments_json(ctx, refs):
+def moments_json(ctx, refs, allowed=None):
     """The text of each referenced moment (see relevant_refs), in order, for the website's
-    "download all relevant moments". Semantic moments are in memory; keyword ones come from their db."""
+    "download all relevant moments". Semantic moments are in memory; keyword ones come from their db.
+    `allowed` (a set of slugs, None = all) drops moments from channels the account may not see; a
+    ref's channel must also match the moment's own, so a hidden moment can't ride on a visible slug."""
+    if allowed is not None:
+        refs = [r for r in refs if r.get("s") in allowed]
     by_slug = {c["slug"]: c for c in ctx["scope"]}
     kw_rows = {}
     want = {}
@@ -5196,7 +5202,7 @@ def moments_json(ctx, refs):
         m = kw_rows.get(cid)
         if m is None:
             c = ctx.get("by_id", {}).get(cid)
-            if c is not None:
+            if c is not None and c.get("_slug") == r.get("s"):
                 m = {"title": c.get("title"), "channel": c.get("channel"), "date": c.get("date"),
                      "timestamp": c.get("timestamp"), "url": c.get("url"), "text": c.get("text", "")}
         if m is not None:
@@ -5312,7 +5318,6 @@ def _shingle_hashes(words, k=DUP_K):
 def _dup_fingerprint(job):
     """One video's duplicate fingerprint, from its raw transcript file. Runs in a worker process."""
     slug, path = job
-    import numpy as np
     v = read_json(path)
     if not isinstance(v, dict) or not v.get("segments"):
         return None
