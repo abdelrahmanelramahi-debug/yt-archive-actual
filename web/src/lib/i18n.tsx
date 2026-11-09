@@ -18,7 +18,6 @@ const DICT: Record<Lang, Record<string, string>> = {
 
     "ex.1": "What is the correct belief about Allah's names and attributes?",
     "ex.2": "Is wudu valid with seawater?",
-    "ex.3": 'How do the scholars respond to John 1:1, "the Word was God"?',
 
     "ask.placeholder": "Ask anything…  (English or Arabic)",
     "ask.submit": "Ask",
@@ -210,7 +209,6 @@ const DICT: Record<Lang, Record<string, string>> = {
 
     "ex.1": "ما المعتقد الصحيح في أسماء الله وصفاته؟",
     "ex.2": "هل يصح الوضوء بماء البحر؟",
-    "ex.3": "كيف يرد العلماء على يوحنا ١:١، «وكان الكلمة الله»؟",
 
     "ask.placeholder": "اسأل أيّ شيء…  (بالعربية أو الإنجليزية)",
     "ask.submit": "اسأل",
