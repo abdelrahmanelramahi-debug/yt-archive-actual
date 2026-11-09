@@ -604,5 +604,6 @@
   "parallel_batches": 10,
   "tag_workers": 12,
   "retag_old": false,
-  "tag_mode": "auto"
+  "tag_mode": "auto",
+  "auto_nest": true
 }
