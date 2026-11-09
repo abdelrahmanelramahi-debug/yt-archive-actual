@@ -473,7 +473,7 @@ function ModeDropup({ modes, mode, onChange, dropUp = true }: { modes: Mode[]; m
             </button>
           ))}
           <p className="mt-1.5 border-t border-line px-2.5 pt-2 text-[12px] leading-relaxed text-muted">
-            Every depth searches <strong className="font-semibold text-ink">all 1.1M moments</strong> — it only
+            Every depth searches <strong className="font-semibold text-ink">every moment</strong> — it only
             changes how many of the best it keeps.
           </p>
         </div>
@@ -519,7 +519,7 @@ function ModeExplainer({ modes }: { modes: Mode[] }) {
       {open && (
         <div className="fade-up mt-2 max-w-md rounded-xl border border-line bg-raised/60 p-3.5 text-[13px] leading-relaxed">
           <p className="text-ink">
-            Every depth searches <strong className="font-semibold">all 1.1M moments</strong> — it only changes how
+            Every depth searches <strong className="font-semibold">every moment</strong> — it only changes how
             many of the best it keeps, so the obscure finds surface either way.
           </p>
           <div className="mt-2.5 space-y-1.5">
@@ -1197,11 +1197,12 @@ export default function Home() {
               {t("hero.subtitle")}
             </p>
             <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-3 sm:mt-7 sm:gap-x-10 sm:gap-y-4">
-              <Stat n={totals ? heroVideos(totals.videos) : "20,000+"} label={t("hero.videos")} />
+              {/* all three count only the channels this account can see (set by /api/channels) */}
+              <Stat n={totals ? heroVideos(totals.videos) : "…"} label={t("hero.videos")} />
               <span className="hidden h-10 w-px bg-line sm:block" />
-              <Stat n={totals ? heroMoments(totals.moments) : "1.1M+"} label={t("hero.moments")} />
+              <Stat n={totals ? heroMoments(totals.moments) : "…"} label={t("hero.moments")} />
               <span className="hidden h-10 w-px bg-line sm:block" />
-              <Stat n={String(channels.length || 19)} label={t("hero.channels")} />
+              <Stat n={channels.length ? String(channels.length) : "…"} label={t("hero.channels")} />
             </div>
           </div>
         )}

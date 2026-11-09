@@ -24,6 +24,15 @@ export async function GET(req: NextRequest) {
         /* leave the list as-is on a transient visibility read error */
       }
     }
+    // the headline totals count only the channels this account can see (the brain sends per-channel
+    // counts; an older brain without them keeps its site-wide totals)
+    if (data && Array.isArray(data.channels)) {
+      const chs = data.channels as { moments?: unknown; videos?: unknown }[];
+      if (chs.every((c) => typeof c.moments === "number" && typeof c.videos === "number")) {
+        data.total_moments = chs.reduce((n, c) => n + (c.moments as number), 0);
+        data.total_videos = chs.reduce((n, c) => n + (c.videos as number), 0);
+      }
+    }
     // attach admin name overrides so the picker can show each channel in the viewer's language
     if (data && Array.isArray(data.channels)) {
       const names = await channelNameOverrides();

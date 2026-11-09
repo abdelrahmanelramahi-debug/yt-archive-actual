@@ -4713,6 +4713,7 @@ def load_search(settings, scope):
     sem_scope = [c for c in scope if c.get("search") != "keyword"]
     kw_scope = [c for c in scope if c.get("search") == "keyword"]
     chunks, mats, row_slugs = [], [], []
+    counts = {}  # slug -> (moments, videos), so the website can total just the channels an account sees
     for ch in sem_scope:
         p = cpaths(ch)
         ids = read_list(p["search"] / "ids.json")
@@ -4731,6 +4732,7 @@ def load_search(settings, scope):
             c["_slug"] = ch["slug"]  # so the transcript window knows which channel a moment is from
             c["_kw"] = False
         chunks += kept
+        counts[ch["slug"]] = (len(kept), len({c["video_id"] for c in kept}))
         mats.append(mat[keep])
         row_slugs += [ch["slug"]] * len(kept)  # which channel each matrix row belongs to
     mat = np.vstack(mats) if mats else None
@@ -4758,9 +4760,12 @@ def load_search(settings, scope):
     for ch in kw_scope:
         try:
             con = kw_db(ch)
-            kw_count += con.execute("SELECT count(*) FROM info").fetchone()[0]
-            kw_videos += con.execute("SELECT count(DISTINCT video_id) FROM info").fetchone()[0]
+            n = con.execute("SELECT count(*) FROM info").fetchone()[0]
+            v = con.execute("SELECT count(DISTINCT video_id) FROM info").fetchone()[0]
             con.close()
+            kw_count += n
+            kw_videos += v
+            counts[ch["slug"]] = (n, v)
         except Exception:
             pass
     if mat is None and not kw_count:
@@ -4777,7 +4782,9 @@ def load_search(settings, scope):
             "vid_ids": vid_ids, "vid_mat": vid_mat, "vid_rows": vid_rows, "vid_cid": vid_cid,
             "quote_db": QUOTE_DB if QUOTE_DB.exists() else None,  # Quran / hadith per moment, read on demand
             "channels_meta": [{"slug": c["slug"], "name": full_name(c),
-                               "kind": "keyword" if c.get("search") == "keyword" else "meaning"}
+                               "kind": "keyword" if c.get("search") == "keyword" else "meaning",
+                               "moments": counts.get(c["slug"], (0, 0))[0],
+                               "videos": counts.get(c["slug"], (0, 0))[1]}
                               for c in scope],
             "total_moments": len(chunks) + kw_count,
             "total_videos": len({c["video_id"] for c in chunks}) + kw_videos}

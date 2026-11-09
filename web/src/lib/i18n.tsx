@@ -31,7 +31,7 @@ const DICT: Record<Lang, Record<string, string>> = {
     "style.disclaimer": "Topical answer — synthesized by AI from the scholars' words. It can make mistakes and translations are approximate, so double-check against the original sources.",
 
     "stage.1": "Breaking your question into angles",
-    "stage.2": "Searching a million moments",
+    "stage.2": "Searching every moment",
     "stage.3": "Reading the most relevant ones",
     "stage.4": "Writing a grounded answer",
     "loading.note": "A thorough answer takes a few moments.",
@@ -220,7 +220,7 @@ const DICT: Record<Lang, Record<string, string>> = {
     "style.disclaimer": "إجابة موضوعية — صاغها الذكاء الاصطناعي من كلام العلماء. قد تقع أخطاء والترجمات تقريبية، فراجِع المصادر الأصلية.",
 
     "stage.1": "نُحلّل سؤالك إلى زوايا",
-    "stage.2": "نبحث في مليون لحظة",
+    "stage.2": "نبحث في كل اللحظات",
     "stage.3": "نقرأ أكثرها صلة",
     "stage.4": "نكتب إجابةً موثّقة",
     "loading.note": "الإجابة الدقيقة تستغرق لحظات.",
