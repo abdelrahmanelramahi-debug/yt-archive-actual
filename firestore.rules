@@ -9,7 +9,9 @@ service cloud.firestore {
       // ...but a user owns their own chat history (saved from the client)
       match /chats/{chatId} {
         allow read, create, delete: if request.auth != null && request.auth.uid == uid;
-        allow update: if false;
+        // a Chat conversation grows one message at a time; a Research answer is never edited
+        allow update: if request.auth != null && request.auth.uid == uid
+          && resource.data.kind == 'chat' && request.resource.data.kind == 'chat';
       }
     }
     match /{document=**} {

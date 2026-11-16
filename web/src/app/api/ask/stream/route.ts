@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyIdToken, consumeDaily } from "../../../../lib/firebase-admin";
+import { verifyIdToken, consumeDaily, consumeChat } from "../../../../lib/firebase-admin";
 import { allowedChannels, channelNameOverrides } from "../../../../lib/channels";
 
 // Streams the brain's Server-Sent Events straight through to the browser. Runs server-side only,
@@ -16,7 +16,16 @@ export async function POST(req: NextRequest) {
   if (!auth) return NextResponse.json({ error: "Please sign in to ask." }, { status: 401 });
   const uid = auth.uid;
 
-  let body: { question?: string; channels?: string[]; mode?: string; style?: string; cand_max?: number; answer_max?: number } = {};
+  let body: {
+    question?: string;
+    channels?: string[];
+    mode?: string;
+    style?: string;
+    cand_max?: number;
+    answer_max?: number;
+    chat?: boolean;
+    history?: { role?: unknown; content?: unknown }[];
+  } = {};
   try {
     body = await req.json();
   } catch {
@@ -29,6 +38,15 @@ export async function POST(req: NextRequest) {
   const channels = Array.isArray(body?.channels) ? body.channels : undefined;
   const mode = typeof body?.mode === "string" ? body.mode : undefined;
   const style = typeof body?.style === "string" ? body.style : undefined;
+  // chat mode: one message in a conversation (its own, cheaper daily allowance). The earlier turns
+  // come from the page; the brain re-checks and clips them, so this only bounds the size.
+  const chat = body?.chat === true;
+  const history = chat && Array.isArray(body?.history)
+    ? body.history
+        .slice(-12)
+        .filter((h) => (h?.role === "user" || h?.role === "assistant") && typeof h?.content === "string")
+        .map((h) => ({ role: h.role as string, content: (h.content as string).slice(0, 8000) }))
+    : undefined;
   // the "custom" depth (admin only): moments + answer length. Honoured only for admins; the brain
   // clamps them. Non-admins can't widen their own budget by hand-crafting a request.
   const candMax = auth.admin && Number.isFinite(body?.cand_max) ? Math.round(body.cand_max as number) : undefined;
@@ -36,16 +54,20 @@ export async function POST(req: NextRequest) {
 
   // reserve one of today's free answers before spending on Claude (cap is per-account)
   try {
-    const res = await consumeDaily(uid, auth.anon);
+    const res = chat ? await consumeChat(uid, auth.anon) : await consumeDaily(uid, auth.anon);
     if (res.remaining < 0) {
       if (auth.anon) {
         return NextResponse.json(
-          { error: `You've used your ${res.cap} free questions. Sign in or create an account to keep going.`, guest: true },
+          { error: `You've used your ${res.cap} free ${chat ? "chat messages" : "questions"}. Sign in or create an account to keep going.`, guest: true },
           { status: 429 }
         );
       }
       return NextResponse.json(
-        { error: `You've used your ${res.cap} free answers for today. They reset at midnight (UTC).` },
+        {
+          error: chat
+            ? `You've used your ${res.cap} chat messages for today. They reset at midnight (UTC) — Research still works.`
+            : `You've used your ${res.cap} free answers for today. They reset at midnight (UTC).`,
+        },
         { status: 429 }
       );
     }
@@ -86,8 +108,9 @@ export async function POST(req: NextRequest) {
         mode,
         style,
         channel_names: Object.keys(names).length ? names : undefined,
-        cand_max: candMax,
-        answer_max: answerMax,
+        cand_max: chat ? undefined : candMax,
+        answer_max: chat ? undefined : answerMax,
+        ...(chat ? { chat: true, history } : {}),
       }),
     });
     if (!r.ok || !r.body) {

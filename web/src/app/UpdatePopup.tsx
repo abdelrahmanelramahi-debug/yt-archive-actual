@@ -45,6 +45,12 @@ const Book = (
     <path d="M4 5.5A2.5 2.5 0 0 1 6.5 3H20v15H6.5A2.5 2.5 0 0 0 4 20.5v-15ZM4 20.5A2.5 2.5 0 0 0 6.5 23H20v-5" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
   </svg>
 );
+const Chat = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden className={ICON}>
+    <path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+    <path d="M8 9.5h8M8 12.5h5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" />
+  </svg>
+);
 const Fixes = (
   <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden className={ICON}>
     <path d="M14.7 6.3a4 4 0 0 1-5.4 5.4L4 17v3h3l5.3-5.3a4 4 0 0 1 5.4-5.4l-2.6 2.6-1.4-1.4 2.6-2.6Z" stroke="currentColor" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
@@ -54,6 +60,12 @@ const Fixes = (
 // Updates, newest first. Add a new entry at the TOP (with a fresh id) to re-show the pop-up; older
 // entries stay as flip-back pages. The id of the top entry is what "seen" is tracked against.
 const UPDATES: { id: string; items: { key: string; icon: ReactNode }[] }[] = [
+  {
+    id: "2026-11-16",
+    items: [
+      { key: "chat", icon: Chat },
+    ],
+  },
   {
     id: "2026-11-09e",
     items: [

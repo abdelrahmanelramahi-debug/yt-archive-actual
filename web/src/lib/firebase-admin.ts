@@ -7,6 +7,9 @@ import { jwtVerify, createRemoteJWKSet, importPKCS8, SignJWT } from "jose";
 const PROJECT_ID = process.env.FIREBASE_PROJECT_ID || "latafti";
 export const DAILY_CAP = Number(process.env.DAILY_CAP || 20);
 export const GUEST_CAP = Number(process.env.GUEST_CAP || 2); // free questions before guests must sign up
+// Chat messages are much cheaper than a Research answer, so they have their own daily allowance.
+export const CHAT_CAP = Number(process.env.CHAT_CAP || 30);
+export const GUEST_CHAT_CAP = Number(process.env.GUEST_CHAT_CAP || 5);
 
 // Bootstrap admins by email (comma-separated), set in the environment. Anyone signed in with one
 // of these emails is treated as an admin — no custom-claim plumbing needed to get started.
@@ -60,18 +63,29 @@ const DOC = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/database
 // together with the effective cap. Read-then-write (no transaction): the tiny concurrency window
 // can let a user get one extra, which is fine for a soft cap. The day resets at UTC midnight.
 export async function consumeDaily(uid: string, guest = false): Promise<{ remaining: number; cap: number }> {
+  return consume(uid, guest, false);
+}
+
+// The same for one chat message: its own count (chatDay/chatCount) against CHAT_CAP, or an admin-set
+// `chatCap` on the account.
+export async function consumeChat(uid: string, guest = false): Promise<{ remaining: number; cap: number }> {
+  return consume(uid, guest, true);
+}
+
+async function consume(uid: string, guest: boolean, chat: boolean): Promise<{ remaining: number; cap: number }> {
   const token = await accessToken();
   const auth = { Authorization: `Bearer ${token}` };
   const today = new Date().toISOString().slice(0, 10);
+  const [dayF, countF, capF] = chat ? ["chatDay", "chatCount", "chatCap"] : ["day", "count", "cap"];
 
   const get = await fetch(`${DOC}/${uid}`, { headers: auth });
   let count = 0;
-  let cap = guest ? GUEST_CAP : await getDefaultCap();
+  let cap = chat ? (guest ? GUEST_CHAT_CAP : CHAT_CAP) : guest ? GUEST_CAP : await getDefaultCap();
   if (get.ok) {
     const f = ((await get.json()) as { fields?: Record<string, { stringValue?: string; integerValue?: string }> }).fields || {};
-    if (f.day?.stringValue === today) count = Number(f.count?.integerValue || 0);
+    if (f[dayF]?.stringValue === today) count = Number(f[countF]?.integerValue || 0);
     if (!guest) {
-      const c = Number(f.cap?.integerValue);
+      const c = Number(f[capF]?.integerValue);
       if (Number.isFinite(c) && c > 0) cap = c; // admin-set per-account override (real accounts only)
     }
   } else if (get.status !== 404) {
@@ -80,16 +94,17 @@ export async function consumeDaily(uid: string, guest = false): Promise<{ remain
   if (count >= cap) return { remaining: -1, cap };
 
   const next = count + 1;
-  // The update mask covers only day/count/updatedAt, so an admin-set `cap` is preserved untouched.
+  // The update mask covers only this counter's fields + updatedAt, so the caps and the other
+  // counter are preserved untouched.
   const patch = await fetch(
-    `${DOC}/${uid}?updateMask.fieldPaths=day&updateMask.fieldPaths=count&updateMask.fieldPaths=updatedAt`,
+    `${DOC}/${uid}?updateMask.fieldPaths=${dayF}&updateMask.fieldPaths=${countF}&updateMask.fieldPaths=updatedAt`,
     {
       method: "PATCH",
       headers: { ...auth, "Content-Type": "application/json" },
       body: JSON.stringify({
         fields: {
-          day: { stringValue: today },
-          count: { integerValue: String(next) },
+          [dayF]: { stringValue: today },
+          [countF]: { integerValue: String(next) },
           updatedAt: { integerValue: String(Date.now()) },
         },
       }),

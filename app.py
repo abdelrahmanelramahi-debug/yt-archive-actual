@@ -1636,12 +1636,14 @@ def call_claude(client, model, prompt, max_tokens):
     return text, claude_cost(model, msg.usage)
 
 
-def call_claude_stream(client, model, prompt, max_tokens):
+def call_claude_stream(client, model, prompt, max_tokens, system=None, messages=None):
     """Like call_claude, but yields the answer as it is generated: ('delta', text) for each chunk,
-    then ('done', (full_text, usd)) once. Lets the website show the answer as it writes."""
+    then ('done', (full_text, usd)) once. Lets the website show the answer as it writes.
+    `messages` (a whole conversation) replaces the single-prompt turn; `system` sets the rules."""
     parts = []
-    with client.messages.stream(model=model, max_tokens=max_tokens,
-                                 messages=[{"role": "user", "content": prompt}]) as stream:
+    extra = {"system": system} if system else {}
+    with client.messages.stream(model=model, max_tokens=max_tokens, **extra,
+                                 messages=messages or [{"role": "user", "content": prompt}]) as stream:
         for text in stream.text_stream:
             parts.append(text)
             yield ("delta", text)
@@ -4790,11 +4792,12 @@ def load_search(settings, scope):
             "total_videos": len({c["video_id"] for c in chunks}) + kw_videos}
 
 
-def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False):
+def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False, angles=True):
     """Find the candidate moments for a question: decompose it into angles, union the semantic and
     keyword retrieval (keeping each chunk's best score), then diversify (<=per_vid per video, up to
     cand_max). `channels` (a list of slugs) limits the search to those channels; None/empty = all.
-    Pure data; used by the CLI and the web server."""
+    `angles=False` skips the decomposition (a Claude call) and searches the question as given - chat
+    mode, where a quick reply matters more than the widest net. Pure data; used by the CLI and the web server."""
     import numpy as np
     cand_max = cand_max or CAND_MAX
     anth, settings = ctx["anth"], ctx["settings"]
@@ -4802,7 +4805,7 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False):
     model_name = ctx["model_name"]
     sel = set(channels) if channels else None  # selected channel slugs, or None for all
     sel_ids = [cid for s, cid in ctx["slug_to_cid"].items() if s in sel] if sel else None
-    queries = _decompose(anth, settings["tag_model"], q)  # the question broken into several search angles
+    queries = _decompose(anth, settings["tag_model"], q) if angles else [q]  # the question broken into several search angles
     sem_hits, qvs = [], []
     if mat is not None:
         wterms = [w for w in re.findall(r"\w{4,}", q.lower()) if w not in STOP]
@@ -4997,6 +5000,118 @@ def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel
                     "relevant": relevant_refs(candidates, relevant if relevant is not None else sorted(emitted)),
                     "coverage": {"moments": len(candidates),
                                  "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}})
+
+
+# ---- Chat mode --------------------------------------------------------------------------------
+# A back-and-forth conversation instead of one long briefing. Each message pulls a small set of the
+# best moments (no map step) and the answer model replies conversationally, citing them. It never
+# gives a ruling of its own: rulings come only from what the channels said in those moments.
+# (moments kept, per video, reply length in tokens) per depth.
+CHAT_MODES = {"quick": (20, 3, 1500), "standard": (40, 4, 2500), "deep": (80, 5, 4000)}
+CHAT_HISTORY_MAX = 12       # earlier messages sent along (6 exchanges)
+CHAT_TURN_CHARS = 6000      # each earlier message is clipped to this
+
+CHAT_SYSTEM = """You are the chat assistant of La Tafti, an archive of Islamic lectures and Q&A from YouTube channels. You talk with the user conversationally, but you are NOT a mufti and you hold no religious positions of your own.
+
+Rules:
+- Any ruling, fatwa or religious verdict (halal/haram, valid/invalid, obligatory/recommended/disliked, a position on creed, what someone should do religiously) must come ONLY from the numbered archive excerpts sent with the user's newest message. Attribute it to the channel that said it (and the speaker only when the excerpt makes it clear), and put the excerpt number in square brackets right after it, like [3] or [3, 7].
+- NEVER give a ruling from your own knowledge or training, even when you know the common answer, and never fill gaps with it. Quran verses and hadith may be mentioned only as the channels themselves cite them in the excerpts.
+- If the excerpts don't address what was asked, say plainly that the archive's channels don't seem to cover it, and suggest running a full Research search on it. Don't guess.
+- Your earlier replies in this conversation were grounded in the excerpts sent with those earlier messages, which are not shown again. Treat what they reported as established - never retract or second-guess them just because the newest excerpts don't repeat it - and you may refer back to them (without citation numbers).
+- Where channels or speakers differ, say so and give each position; don't pick a side, harmonise them, or add your own verdict.
+- Things that are not rulings are fine to help with directly: clarifying or rephrasing an earlier reply, defining a term, summarising, a greeting - briefly, and without adding religious claims beyond the excerpts.
+- Be conversational and to the point: a few short paragraphs at most, bullets only when listing. No headings unless asked for a breakdown. No introduction or sign-off.
+- Write only about what the channels said. Never mention "excerpts", "clips", numbering, searching, captions being cut off, or how the material was gathered - if a speaker's conclusion isn't there, just say he didn't state one. The captions are auto-generated, so names and Arabic terms can be garbled.
+- {language}"""
+
+CHAT_QUERY_PROMPT = """You prepare archive searches for a chat about Islamic topics. Below is the conversation so far and the user's newest message.
+Write ONE standalone search question that captures what the newest message is asking, resolving words like "it", "that" or "what about..." from the conversation. Keep the language of the newest message.
+If the newest message needs no search at all (a greeting, thanks, or a request to reword, shorten, translate or explain the assistant's previous reply), reply with exactly: NONE
+Reply with only the search question, or NONE.
+
+Conversation:
+{history}
+
+Newest message: {q}"""
+
+
+def _chat_history(history):
+    """Clean the conversation the page sent: alternating user/assistant turns (oldest first), each
+    clipped, the last CHAT_HISTORY_MAX kept, starting on a user turn. Citation numbers are dropped
+    from earlier replies - they pointed at that turn's own moments, not this one's."""
+    out = []
+    for h in (history or [])[-CHAT_HISTORY_MAX:]:
+        role, text = (h or {}).get("role"), str((h or {}).get("content") or "").strip()
+        if role not in ("user", "assistant") or not text:
+            continue
+        if role == "assistant":
+            text = _CITE_RE.sub("", text)
+        text = text[:CHAT_TURN_CHARS]
+        if out and out[-1]["role"] == role:
+            out[-1]["content"] += "\n\n" + text  # two in a row (a failed turn): merge them
+        else:
+            out.append({"role": role, "content": text})
+    while out and out[0]["role"] != "user":
+        out.pop(0)
+    if out and out[-1]["role"] == "user":
+        out.pop()  # an unanswered message: the new one replaces it
+    return out
+
+
+def _chat_search_query(anth, model, q, history):
+    """The newest message as a standalone search question ('' = no search needed), and its cost."""
+    if not history:
+        return q, 0.0
+    convo = "\n".join(f"{h['role'].upper()}: {h['content'][:1500]}" for h in history[-6:])
+    try:
+        txt, usd = call_claude(anth, model, CHAT_QUERY_PROMPT.format(history=convo, q=q), 200)
+    except Exception:
+        return q, 0.0
+    txt = txt.strip().strip('"')
+    if txt.upper() == "NONE":
+        return "", usd
+    return (txt.splitlines()[0].strip() if txt else q) or q, usd
+
+
+def chat_answer_stream(ctx, q, history=None, channels=None, mode=None, channel_names=None):
+    """Chat mode, streamed: the same (kind, payload) events as answer_question_stream - 'status',
+    'delta's, the cited 'source's, then 'done' - for one message in a conversation. `history` is the
+    conversation so far ([{role, content}], oldest first)."""
+    cmax, per_vid, reply_max = CHAT_MODES.get(mode or DEFAULT_MODE, CHAT_MODES[DEFAULT_MODE])
+    route = MODES.get(mode or DEFAULT_MODE, MODES[DEFAULT_MODE]).get("route", False)
+    anth, settings = ctx["anth"], ctx["settings"]
+    hist = _chat_history(history)
+    yield ("status", "searching")
+    search_q, usd = _chat_search_query(anth, settings["tag_model"], q, hist)
+    candidates = []
+    if search_q:
+        candidates, _ = retrieve(ctx, search_q, channels=channels, cand_max=cmax, per_vid=per_vid,
+                                 route=route, angles=False)
+        candidates = _apply_channel_names(ctx, q, candidates, channel_names)
+    if candidates:
+        block = "\n\n".join(_numbered_excerpts(candidates))
+        newest = f"Archive excerpts for my newest message:\n\n{block}\n\nMy message: {q}"
+    elif search_q:
+        newest = f"(The archive search found nothing for this message.)\n\nMy message: {q}"
+    else:
+        newest = q
+    yield ("status", "writing")
+    answer = ""
+    for kind, payload in call_claude_stream(anth, settings["answer_model"], None, writer_max_tokens(reply_max),
+                                            system=CHAT_SYSTEM.format(language=ctx["lang"]),
+                                            messages=hist + [{"role": "user", "content": newest}]):
+        if kind == "delta":
+            yield ("delta", payload)
+        else:
+            answer, u = payload
+            usd += u
+    cited = _cited_numbers(answer, len(candidates))
+    for n in cited:
+        yield ("source", source_json(ctx, candidates[n - 1], n))
+    yield ("done", {"usd": usd, "relevant": relevant_refs(candidates, sorted(cited)),
+                    "coverage": {"moments": len(candidates),
+                                 "videos": len({c["video_id"] for c in candidates}),
+                                 "channels": len({candidates[n - 1].get("channel") for n in cited})}})
 
 
 def transcript_context(ctx, chunk, before=4, after=4):

@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState } from "react";
-import { collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy, limit, serverTimestamp } from "firebase/firestore";
+import { collection, addDoc, deleteDoc, doc, onSnapshot, query, orderBy, limit, serverTimestamp, updateDoc } from "firebase/firestore";
 import { useAuth, signOutUser, idToken } from "../lib/auth";
 import { useLang, LangToggle, type Lang } from "../lib/i18n";
 import { db } from "../lib/firebase";
@@ -10,9 +10,38 @@ import UpdatePopup from "./UpdatePopup";
 
 const DAILY_CAP = 20; // free answers per user per day (keep in sync with the server's cap)
 const GUEST_CAP = 2; // free questions for a guest (anonymous) before they're asked to sign up
+const CHAT_CAP = 30; // chat messages per user per day (keep in sync with the server's CHAT_CAP)
+const GUEST_CHAT_CAP = 5;
+// typical cost of one chat message per depth (no read-everything step, so far below a Research answer)
+const CHAT_USD: Record<string, number> = { quick: 0.02, standard: 0.03, deep: 0.05 };
+const CHAT_KEEPS: Record<string, string> = { quick: "~20", standard: "~40", deep: "~80" };
 
-// one saved question+answer in the user's history (sources stored light — no transcript windows)
-type ChatDoc = { id: string; q: string; answer: string; sources: Source[]; coverage: Coverage; cost_usd?: number | null; style?: string; relevant?: Ref[] };
+// one saved item in the user's history: a Research question+answer, or (kind "chat") a whole Chat
+// conversation, whose `q` is its first message and `turns` its exchanges
+type ChatDoc = {
+  id: string;
+  q: string;
+  answer: string;
+  sources: Source[];
+  coverage: Coverage;
+  cost_usd?: number | null;
+  style?: string;
+  relevant?: Ref[];
+  kind?: "chat";
+  turns?: Turn[];
+};
+
+// one exchange in a Chat conversation
+type Turn = {
+  q: string;
+  answer: string;
+  sources: Source[];
+  coverage?: Coverage;
+  cost_usd?: number | null;
+  status?: "loading" | "streaming" | "done" | "error";
+  stage?: string;
+  error?: string;
+};
 
 type Line = { ts: string | null; text: string };
 type Source = {
@@ -100,6 +129,59 @@ function whenVisible(): Promise<void> {
     };
     document.addEventListener("visibilitychange", on);
   });
+}
+
+// Read one connection's Server-Sent Events, handing each (event, data) to `on`. Resolves true once
+// `on` says the answer is finished, false if the connection closed first. Keep-alive comments skip.
+async function readEvents(body: ReadableStream<Uint8Array>, on: (ev: string, obj: Record<string, unknown>) => boolean): Promise<boolean> {
+  const reader = body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) return false;
+    buf += dec.decode(value, { stream: true });
+    let sep: number;
+    while ((sep = buf.indexOf("\n\n")) >= 0) {
+      const block = buf.slice(0, sep);
+      buf = buf.slice(sep + 2);
+      let ev = "message";
+      let data = "";
+      for (const line of block.split("\n")) {
+        if (line.startsWith("event:")) ev = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
+      }
+      if (!data) continue;
+      let obj: Record<string, unknown>;
+      try {
+        obj = JSON.parse(data);
+      } catch {
+        continue;
+      }
+      if (on(ev, obj)) {
+        reader.cancel().catch(() => {});
+        return true;
+      }
+    }
+  }
+}
+
+// A source as saved in history: the transcript window + cited line stay (so a reopened chat shows its
+// transcripts); the whole hadith and its English stay out.
+function lightSource(s: Source, withContext = true) {
+  return {
+    n: s.n,
+    timestamp: s.timestamp,
+    title: s.title,
+    channel: s.channel ?? null,
+    date: s.date ?? null,
+    url: s.url,
+    video_id: s.video_id ?? null,
+    slug: s.slug ?? null,
+    context: withContext ? (s.context ?? []).map((l) => ({ ts: l.ts ?? null, text: l.text })) : [],
+    citedIdx: s.citedIdx ?? 0,
+    ...(s.quotes?.length ? { quotes: s.quotes.map((q) => (q.kind === "hadith" ? { ...q, ar_full: "", en: "" } : q)) } : {}),
+  };
 }
 
 type Channel = { slug: string; name: string; kind: string; en?: string; ar?: string };
@@ -417,11 +499,25 @@ function ChannelPicker({
 
 // Compact depth selector holding the depths, their cost, and the explainer. Opens up above the ask
 // bar on the phone landing; opens down once the controls sit at the top (after a question is asked).
-function ModeDropup({ modes, mode, onChange, dropUp = true, moments }: { modes: Mode[]; mode: string; onChange: (id: string) => void; dropUp?: boolean; moments?: string }) {
+function ModeDropup({
+  modes,
+  mode,
+  onChange,
+  dropUp = true,
+  moments,
+  keeps: keepsFor,
+}: {
+  modes: Mode[];
+  mode: string;
+  onChange: (id: string) => void;
+  dropUp?: boolean;
+  moments?: string;
+  keeps?: Record<string, string>; // Chat keeps far fewer moments per message than a Research answer
+}) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
-  const current = modes.find((m) => m.id === mode);
-  const keeps: Record<string, string> = { quick: "~120", standard: "~500", deep: "~1,000", custom: "you set" };
+  const current = modes.find((m) => m.id === mode) ?? modes.find((m) => m.id === "deep");
+  const keeps: Record<string, string> = keepsFor ?? { quick: "~120", standard: "~500", deep: "~1,000", custom: "you set" };
 
   useEffect(() => {
     if (!open) return;
@@ -654,6 +750,29 @@ export default function Home() {
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
   const [guestOpen, setGuestOpen] = useState(false);
+  // Research (one long cited briefing) or Chat (a conversation); remembered on this device
+  const [view, setViewState] = useState<"research" | "chat">("research");
+  const [turns, setTurns] = useState<Turn[]>([]); // the Chat conversation on screen
+  const [chatUsed, setChatUsed] = useState(0);
+  const [chatCap, setChatCap] = useState(CHAT_CAP);
+  const chatDocId = useRef<string | null>(null); // the saved conversation this one grows
+  const chatSession = useRef(0); // bumped on new/open, so a reply still streaming can't land in the wrong chat
+
+  useEffect(() => {
+    try {
+      if (localStorage.getItem("view") === "chat") setViewState("chat");
+    } catch {
+      /* storage blocked: start on Research */
+    }
+  }, []);
+  function setView(v: "research" | "chat") {
+    setViewState(v);
+    try {
+      localStorage.setItem("view", v);
+    } catch {
+      /* ignore */
+    }
+  }
 
   // start collapsed on phones (where it's a full-screen overlay)
   useEffect(() => {
@@ -689,11 +808,18 @@ export default function Home() {
     return onSnapshot(
       doc(db, "users", user.uid),
       (snap) => {
-        const d = snap.data() as { day?: string; count?: number; cap?: number } | undefined;
+        const d = snap.data() as
+          | { day?: string; count?: number; cap?: number; chatDay?: string; chatCount?: number; chatCap?: number }
+          | undefined;
         setUsedToday(d && d.day === today ? d.count ?? 0 : 0);
         setDailyCap(typeof d?.cap === "number" && d.cap > 0 ? d.cap : DAILY_CAP);
+        setChatUsed(d && d.chatDay === today ? d.chatCount ?? 0 : 0);
+        setChatCap(typeof d?.chatCap === "number" && d.chatCap > 0 ? d.chatCap : CHAT_CAP);
       },
-      () => setUsedToday(0)
+      () => {
+        setUsedToday(0);
+        setChatUsed(0);
+      }
     );
   }, [user]);
 
@@ -743,22 +869,7 @@ export default function Home() {
         q,
         answer,
         // keep the transcript window + cited line so a reopened chat shows its transcripts
-        sources: sources.map((s) => ({
-          n: s.n,
-          timestamp: s.timestamp,
-          title: s.title,
-          channel: s.channel ?? null,
-          date: s.date ?? null,
-          url: s.url,
-          video_id: s.video_id ?? null,
-          slug: s.slug ?? null,
-          context: (s.context ?? []).map((l) => ({ ts: l.ts ?? null, text: l.text })),
-          citedIdx: s.citedIdx ?? 0,
-          // the matched passage only: the whole hadith and its English stay out of the saved chat
-          ...(s.quotes?.length
-            ? { quotes: s.quotes.map((q) => (q.kind === "hadith" ? { ...q, ar_full: "", en: "" } : q)) }
-            : {}),
-        })),
+        sources: sources.map((s) => lightSource(s)),
         coverage,
         cost_usd: cost ?? null,
         // the relevant moments as compact refs (~50 bytes each), so a reopened chat can still download them
@@ -773,7 +884,220 @@ export default function Home() {
     }
   }
 
+  // Save a Chat conversation after each reply: the first reply creates it in history, later ones
+  // update it. Older turns drop their transcript windows if the conversation grows large, to stay
+  // well inside Firestore's 1 MB per document.
+  async function saveChatThread(all: Turn[], session: number) {
+    if (!user || !all.length) return;
+    const pack = (ctxFrom: number) =>
+      all.map((tn, i) => ({
+        q: tn.q,
+        answer: tn.answer,
+        sources: tn.sources.map((s) => lightSource(s, i >= ctxFrom)),
+        coverage: tn.coverage ?? EMPTY_COV,
+        cost_usd: tn.cost_usd ?? null,
+      }));
+    let saved = pack(0);
+    if (JSON.stringify(saved).length > 700_000) saved = pack(Math.max(0, all.length - 5));
+    try {
+      if (chatDocId.current) {
+        await updateDoc(doc(db, "users", user.uid, "chats", chatDocId.current), { kind: "chat", turns: saved });
+      } else {
+        const ref = await addDoc(collection(db, "users", user.uid, "chats"), {
+          kind: "chat",
+          q: all[0].q,
+          answer: "",
+          sources: [],
+          coverage: EMPTY_COV,
+          turns: saved,
+          createdAt: serverTimestamp(),
+        });
+        if (chatSession.current === session) {
+          chatDocId.current = ref.id;
+          setCurrentChatId(ref.id);
+        }
+      }
+    } catch {
+      /* best-effort: never block the conversation on a history write */
+    }
+  }
+
+  // Send one Chat message: it goes to the same streaming answer route with the conversation so far,
+  // and the reply streams into its own turn. Reconnects like a Research answer if the page drops.
+  async function askChat(message: string) {
+    const text = message.trim();
+    if (!text || turns.some((tn) => tn.status === "loading" || tn.status === "streaming")) return;
+    if (user?.isAnonymous && chatUsed >= GUEST_CHAT_CAP) {
+      setGuestOpen(true);
+      return;
+    }
+    const token = await idToken();
+    const session = chatSession.current;
+    const prior = turns.filter((tn) => tn.status !== "error" && tn.answer);
+    const idx = turns.length;
+    setTurns([...turns, { q: text, answer: "", sources: [], status: "loading", stage: "searching" }]);
+    setQ("");
+    // bring the new message to the top of the screen, so its reply reads from the start as it writes
+    setTimeout(() => document.getElementById(`chat-turn-${idx}`)?.scrollIntoView({ behavior: "smooth", block: "start" }), 50);
+    const upd = (patch: Partial<Turn>) => {
+      if (chatSession.current !== session) return;
+      setTurns((ts) => ts.map((tn, i) => (i === idx ? { ...tn, ...patch } : tn)));
+    };
+    if (!token) {
+      upd({ status: "error", error: t("err.signInAgain") });
+      return;
+    }
+    const useSubset = channels.length > 0 && selected.size > 0 && selected.size < channels.length;
+    const payload = {
+      question: text,
+      chat: true,
+      mode: mode === "custom" ? "deep" : mode,
+      channels: useSubset ? [...selected] : undefined,
+      history: prior.flatMap((tn) => [
+        { role: "user", content: tn.q },
+        { role: "assistant", content: tn.answer },
+      ]),
+    };
+    const st = { acc: "", srcs: [] as Source[], seen: 0, jobId: null as string | null };
+    let fin: { coverage?: Coverage; cost?: number } | null = null;
+    let failed: string | null = null;
+    let raf = false;
+    const on = (ev: string, obj: Record<string, unknown>) => {
+      if (ev === "job") {
+        st.jobId = typeof obj.id === "string" ? obj.id : null;
+        return false;
+      }
+      st.seen++;
+      if (ev === "status") upd({ stage: String(obj.stage ?? "") });
+      else if (ev === "delta") {
+        st.acc += String(obj.text ?? "");
+        if (!raf) {
+          raf = true;
+          requestAnimationFrame(() => {
+            raf = false;
+            upd({ status: "streaming", answer: st.acc });
+          });
+        }
+      } else if (ev === "source") st.srcs.push(obj as unknown as Source);
+      else if (ev === "done" || ev === "empty") {
+        fin = { coverage: obj.coverage as Coverage | undefined, cost: obj.cost_usd as number | undefined };
+        return true;
+      } else if (ev === "error") {
+        failed = String(obj.error || t("err.generic"));
+        return true;
+      }
+      return false;
+    };
+
+    let body: ReadableStream<Uint8Array> | null = null;
+    try {
+      const r = await fetch("/api/ask/stream", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}` },
+        body: JSON.stringify(payload),
+      });
+      if (!r.ok || !r.body) {
+        const d = (await r.json().catch(() => ({}))) as { error?: string; guest?: boolean };
+        if (d.guest) {
+          if (chatSession.current === session) setTurns((ts) => ts.slice(0, idx));
+          setGuestOpen(true);
+          return;
+        }
+        upd({ status: "error", error: d.error || t("err.generic") });
+        return;
+      }
+      body = r.body;
+    } catch {
+      upd({ status: "error", error: t("err.server") });
+      return;
+    }
+    let tries = 0;
+    for (;;) {
+      if (body) {
+        const before = st.seen;
+        let terminal = false;
+        try {
+          terminal = await readEvents(body, on);
+        } catch {
+          /* connection dropped: reconnect below */
+        }
+        if (terminal) break;
+        if (st.seen > before) tries = 0;
+      }
+      body = null;
+      if (!st.jobId || tries >= 8) break;
+      tries++;
+      await whenVisible();
+      await new Promise((res) => setTimeout(res, tries === 1 ? 250 : 1500));
+      try {
+        const tk = await idToken();
+        const r = await fetch(`/api/ask/job?id=${st.jobId}&after=${st.seen}`, {
+          headers: tk ? { Authorization: `Bearer ${tk}` } : undefined,
+        });
+        if (r.status === 404) break;
+        if (r.ok && r.body) body = r.body;
+      } catch {
+        /* still offline: try again */
+      }
+    }
+    if (failed) {
+      upd({ status: "error", error: failed });
+      return;
+    }
+    if (!fin && !st.acc) {
+      upd({ status: "error", error: t("err.interrupted") });
+      return;
+    }
+    const done = fin as { coverage?: Coverage; cost?: number } | null;
+    const turn: Turn = {
+      q: text,
+      answer: st.acc,
+      sources: st.srcs,
+      coverage: done?.coverage ?? EMPTY_COV,
+      cost_usd: done?.cost ?? null,
+      status: "done",
+    };
+    if (chatSession.current !== session) return;
+    upd(turn);
+    saveChatThread([...prior, turn], session);
+  }
+
+  // drop a failed message and send it again
+  function retryChat(i: number) {
+    const tn = turns[i];
+    if (!tn) return;
+    setTurns((ts) => ts.filter((_, j) => j !== i));
+    setTimeout(() => askChatRef.current(tn.q), 0);
+  }
+  const askChatRef = useRef(askChat);
+  askChatRef.current = askChat;
+
+  // from a Chat reply: carry the message over to Research, ready to run in depth
+  function researchThis(question: string) {
+    setView("research");
+    setAsked(null);
+    setResult(null);
+    setStatus("idle");
+    setError("");
+    setStreamText("");
+    setCurrentChatId(null);
+    setQ(question);
+    window.scrollTo({ top: 0, behavior: "smooth" });
+    setTimeout(() => inputRef.current?.focus(), 50);
+  }
+
   function openChat(c: ChatDoc) {
+    if (c.kind === "chat") {
+      chatSession.current++;
+      chatDocId.current = c.id;
+      setTurns((c.turns || []).map((tn) => ({ ...tn, sources: tn.sources || [], status: "done" as const })));
+      setView("chat");
+      setCurrentChatId(c.id);
+      if (window.innerWidth < 640) setSidebarOpen(false);
+      setTimeout(() => window.scrollTo({ top: document.body.scrollHeight }), 30);
+      return;
+    }
+    setView("research");
     setAsked(c.q);
     setAnswerStyle(c.style === "verbatim" ? "verbatim" : "topical");
     setResult({ q: c.q, empty: false, answer: c.answer, sources: c.sources || [], coverage: c.coverage, cost_usd: c.cost_usd ?? undefined, relevant: c.relevant });
@@ -1086,7 +1410,12 @@ export default function Home() {
 
   function onSubmit(e: React.FormEvent) {
     e.preventDefault();
-    ask(q);
+    send(q);
+  }
+  // the ask bar sends to whichever view is showing
+  function send(text: string) {
+    if (view === "chat") askChat(text);
+    else ask(text);
   }
 
   // start a fresh question — the landing hero + empty ask bar (a soft reset, no reload)
@@ -1100,6 +1429,9 @@ export default function Home() {
     setReturnY(null);
     setCiteToast(null);
     setCurrentChatId(null);
+    chatSession.current++;
+    chatDocId.current = null;
+    setTurns([]);
     if (window.innerWidth < 640) setSidebarOpen(false);
     window.scrollTo({ top: 0, behavior: "smooth" });
   }
@@ -1129,14 +1461,22 @@ export default function Home() {
     const id = setTimeout(() => setCiteToast(null), 2800);
     return () => clearTimeout(id);
   }, [citeToast]);
-  const landing = status === "idle";
+  const chatView = view === "chat";
+  const chatActive = chatView && turns.length > 0; // a conversation is on screen (bar pinned at the bottom)
+  const chatBusy = turns.some((tn) => tn.status === "loading" || tn.status === "streaming");
+  const landing = chatView ? !chatActive : status === "idle";
   const noneSelected = channels.length > 0 && selected.size === 0;
   // this account's searchable moments (only the channels it can see), for the depth and loading copy
   const momentsLabel = totals ? heroMoments(totals.moments) : undefined;
   // admins get a 4th "Custom" depth whose cost tracks the dials; everyone else sees the server's modes
   const customUsd = estimateCost(customMoments, customTokens);
-  const displayModes: Mode[] = isAdmin ? [...modes, { id: "custom", label: t("mode.custom"), usd: customUsd }] : modes;
-  const modeUsd = displayModes.find((m) => m.id === mode)?.usd ?? TYPICAL_COST;
+  // Chat keeps the same depths (minus the admin custom one) at its own, much lower, prices
+  const displayModes: Mode[] = chatView
+    ? modes.map((m) => ({ ...m, usd: CHAT_USD[m.id] ?? m.usd }))
+    : isAdmin
+      ? [...modes, { id: "custom", label: t("mode.custom"), usd: customUsd }]
+      : modes;
+  const modeUsd = displayModes.find((m) => m.id === mode)?.usd ?? (chatView ? CHAT_USD.deep : TYPICAL_COST);
 
   if (authLoading) {
     return <main className="grid min-h-[70vh] place-items-center text-sm text-faint">Loading…</main>;
@@ -1159,6 +1499,8 @@ export default function Home() {
         email={user.email ?? ""}
         usedToday={usedToday}
         dailyCap={user.isAnonymous ? GUEST_CAP : dailyCap}
+        chatUsed={chatUsed}
+        chatCap={user.isAnonymous ? GUEST_CHAT_CAP : chatCap}
         isGuest={!!user.isAnonymous}
         isAdmin={isAdmin}
         onOpenAdmin={() => setAdminOpen(true)}
@@ -1167,7 +1509,7 @@ export default function Home() {
       {guestOpen && <GuestPrompt onClose={() => setGuestOpen(false)} />}
       {!user.isAnonymous && <UpdatePopup />}
       <div className={`transition-[margin] duration-200 ${sidebarOpen ? "ltr:sm:ml-[264px] rtl:sm:mr-[264px]" : ""}`}>
-        <main className={`mx-auto w-full max-w-3xl px-5 ${landing ? "pb-10" : "pb-28"}`}>
+        <main className={`mx-auto w-full max-w-3xl px-5 ${landing ? "pb-10" : chatActive ? "pb-0" : "pb-28"}`}>
           {/* top bar: open the sidebar (always on phones; on desktop only when it's collapsed) */}
           <div className="flex items-center gap-1 py-4 sm:py-5">
             <button
@@ -1183,20 +1525,34 @@ export default function Home() {
             <button type="button" onClick={newChat} aria-label="La Tafti" className="rounded-md p-1 transition hover:opacity-75 sm:hidden">
               <Wordmark />
             </button>
-            <div className="ms-auto">
+            <div className="ms-auto flex flex-col items-end gap-1.5">
               <LangToggle />
+              <ViewToggle value={view} onChange={setView} />
             </div>
           </div>
 
+          {/* the Chat conversation, above the message bar pinned to the bottom */}
+          {chatActive && (
+            <ChatThread turns={turns} onRetry={retryChat} onResearch={researchThis} momentsLabel={momentsLabel} />
+          )}
+
           {/* hero + suggestions + ask (ask block anchored to the bottom of the viewport on landing) */}
-      <section className={landing ? "flex min-h-[calc(100dvh-6rem)] flex-col pt-6" : "pt-5"}>
+      <section
+        className={
+          landing
+            ? "flex min-h-[calc(100dvh-7.5rem)] flex-col pt-6"
+            : chatActive
+              ? "sticky bottom-0 z-20 -mx-5 bg-paper/95 px-5 pb-4 pt-3 backdrop-blur"
+              : "pt-5"
+        }
+      >
         {landing && (
           <div className="fade-up mb-6 sm:mb-8">
             <h1 dir="auto" className="max-w-2xl text-balance font-serif text-[1.6rem] font-medium leading-[1.14] tracking-tight text-ink sm:text-[2.7rem] sm:leading-[1.12]">
-              {t("hero.title")}
+              {t(chatView ? "chat.title" : "hero.title")}
             </h1>
             <p dir="auto" className="mt-3 max-w-xl text-[14px] leading-relaxed text-muted sm:mt-4 sm:text-[16px]">
-              {t("hero.subtitle")}
+              {t(chatView ? "chat.subtitle" : "hero.subtitle")}
             </p>
             <div className="mt-5 flex flex-wrap items-center gap-x-6 gap-y-3 sm:mt-7 sm:gap-x-10 sm:gap-y-4">
               {/* all three count only the channels this account can see (set by /api/channels) */}
@@ -1224,7 +1580,7 @@ export default function Home() {
                       dir="auto"
                       onClick={() => {
                         setQ(ex);
-                        ask(ex);
+                        send(ex);
                       }}
                       className="rounded-lg border border-line bg-raised/60 px-3.5 py-2 text-start text-[13.5px] text-muted transition hover:border-line2 hover:text-ink"
                     >
@@ -1241,10 +1597,17 @@ export default function Home() {
             <>
               {/* compact dropdowns: always on phones, and on desktop too once a question is asked
                   (the ask bar sits at the top then, so the expanded controls would just clutter) */}
-              <div className={`mb-4 flex items-center justify-end gap-2 ${landing ? "sm:hidden" : ""}`}>
-                <StyleToggle value={style} onChange={setStyle} />
-                <ChannelPicker channels={channels} selected={selected} onChange={setSelected} compact dropUp={landing} />
-                <ModeDropup modes={displayModes} mode={mode} onChange={setMode} dropUp={landing} moments={momentsLabel} />
+              <div className={`${chatActive ? "mb-2.5" : "mb-4"} flex items-center justify-end gap-2 ${landing ? "sm:hidden" : ""}`}>
+                {!chatView && <StyleToggle value={style} onChange={setStyle} />}
+                <ChannelPicker channels={channels} selected={selected} onChange={setSelected} compact dropUp={landing || chatActive} />
+                <ModeDropup
+                  modes={displayModes}
+                  mode={mode}
+                  onChange={setMode}
+                  dropUp={landing || chatActive}
+                  moments={momentsLabel}
+                  keeps={chatView ? CHAT_KEEPS : undefined}
+                />
                 {noneSelected && <span className="text-[13px] text-danger">{t("controls.pickChannel")}</span>}
               </div>
 
@@ -1261,17 +1624,17 @@ export default function Home() {
                   <ChannelPicker channels={channels} selected={selected} onChange={setSelected} />
                 </div>
                 <div className="flex flex-col items-end gap-2">
-                  <ModeExplainer modes={displayModes} moments={momentsLabel} />
-                  <p className="text-[13px] text-gold2">{t("controls.perAnswer", { price: aed(modeUsd) })}</p>
+                  {!chatView && <ModeExplainer modes={displayModes} moments={momentsLabel} />}
+                  <p className="text-[13px] text-gold2">{t(chatView ? "controls.perMessage" : "controls.perAnswer", { price: aed(modeUsd) })}</p>
                   <div className="flex items-center gap-2">
-                    <StyleToggle value={style} onChange={setStyle} />
+                    {!chatView && <StyleToggle value={style} onChange={setStyle} />}
                     <ModePicker modes={displayModes} mode={mode} onChange={setMode} />
                   </div>
                 </div>
               </div>
 
               {/* admin "Custom" depth: the two dials + live estimate, shown when that mode is picked */}
-              {mode === "custom" && isAdmin && (
+              {mode === "custom" && isAdmin && !chatView && (
                 <div className="mb-3 flex justify-end">
                   <CustomControls
                     moments={customMoments}
@@ -1295,18 +1658,18 @@ export default function Home() {
                 onKeyDown={(e) => {
                   if (e.key === "Enter" && !e.shiftKey) {
                     e.preventDefault();
-                    ask(q);
+                    send(q);
                   }
                 }}
                 rows={1}
                 dir="auto"
-                placeholder={t("ask.placeholder")}
+                placeholder={t(chatView ? "chat.placeholder" : "ask.placeholder")}
                 /* 16px keeps iOS Safari from auto-zooming when the field is focused */
                 className="max-h-40 flex-1 resize-none bg-transparent py-2 text-[16px] leading-relaxed text-ink outline-none placeholder:text-faint"
               />
               <button
                 type="submit"
-                disabled={!q.trim() || status === "loading" || noneSelected}
+                disabled={!q.trim() || (chatView ? chatBusy : status === "loading") || noneSelected}
                 aria-label={t("ask.submit")}
                 className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent text-paper transition enabled:hover:bg-accent2 disabled:opacity-30"
               >
@@ -1321,7 +1684,7 @@ export default function Home() {
       </section>
 
       {/* conversation area */}
-      {asked && (
+      {!chatView && asked && (
         <section className="mt-9">
           {/* topical answers are AI-synthesized, so flag that up front (verbatim quotes don't need it) */}
           {answerStyle === "topical" && (status === "streaming" || (status === "done" && result && !result.empty)) && (
@@ -1426,6 +1789,8 @@ function Sidebar({
   email,
   usedToday,
   dailyCap,
+  chatUsed,
+  chatCap,
   isGuest,
   isAdmin,
   onOpenAdmin,
@@ -1441,6 +1806,8 @@ function Sidebar({
   email: string;
   usedToday: number;
   dailyCap: number;
+  chatUsed: number;
+  chatCap: number;
   isGuest: boolean;
   isAdmin: boolean;
   onOpenAdmin: () => void;
@@ -1490,8 +1857,13 @@ function Sidebar({
                 key={c.id}
                 className={`group/chat relative rounded-lg transition ${c.id === currentChatId ? "bg-line/60" : "hover:bg-line/30"}`}
               >
-                <button type="button" onClick={() => onOpenChat(c)} dir="auto" title={c.q} className="block w-full truncate rounded-lg px-2.5 py-2 pe-7 text-start text-[13px] text-ink">
-                  {c.q}
+                <button type="button" onClick={() => onOpenChat(c)} dir="auto" title={c.q} className="flex w-full items-center gap-1.5 rounded-lg px-2.5 py-2 pe-7 text-start text-[13px] text-ink">
+                  {c.kind === "chat" && (
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" aria-label={t("view.chat")} className="shrink-0 text-accent">
+                      <path d="M5 5h14a1 1 0 0 1 1 1v9a1 1 0 0 1-1 1h-8l-4 3.5V16H5a1 1 0 0 1-1-1V6a1 1 0 0 1 1-1Z" stroke="currentColor" strokeWidth="1.8" strokeLinejoin="round" />
+                    </svg>
+                  )}
+                  <span className="min-w-0 truncate">{c.q}</span>
                 </button>
                 <button
                   type="button"
@@ -1536,6 +1908,7 @@ function Sidebar({
                   ? t("guest.usage", { used: usedToday, cap: dailyCap })
                   : t("sidebar.answersToday", { used: usedToday, cap: dailyCap })}
               </p>
+              <p className="text-[11px] text-faint">{t("sidebar.chatToday", { used: chatUsed, cap: chatCap })}</p>
             </div>
             <button type="button" onClick={() => signOutUser()} aria-label={t("aria.signout")} title={t("aria.signout")} className="shrink-0 rounded-md p-1.5 text-faint transition hover:bg-line/40 hover:text-ink rtl:-scale-x-100">
               <svg width="16" height="16" viewBox="0 0 24 24" fill="none" aria-hidden>
@@ -1987,6 +2360,172 @@ function AdminRow({
   );
 }
 
+/* Research (one long cited briefing) vs. Chat (a conversation). Sits under the language switch. */
+function ViewToggle({ value, onChange }: { value: "research" | "chat"; onChange: (v: "research" | "chat") => void }) {
+  const { t } = useLang();
+  return (
+    <div className="inline-flex items-center rounded-full border border-line bg-raised/70 p-0.5 text-[12px] leading-none">
+      {(["research", "chat"] as const).map((v) => (
+        <button
+          key={v}
+          type="button"
+          onClick={() => onChange(v)}
+          aria-pressed={value === v}
+          className={`rounded-full px-2.5 py-1 transition-colors ${
+            value === v ? "bg-accent/12 font-medium text-accent" : "text-faint hover:text-muted"
+          }`}
+        >
+          {t(`view.${v}`)}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+/* The Chat conversation: each message, its reply (streaming in), and the reply's sources folded
+   away under a chip until opened or a citation is tapped. */
+function ChatThread({
+  turns,
+  onRetry,
+  onResearch,
+  momentsLabel,
+}: {
+  turns: Turn[];
+  onRetry: (i: number) => void;
+  onResearch: (q: string) => void;
+  momentsLabel?: string;
+}) {
+  const { t } = useLang();
+  return (
+    // tall enough that the pinned message bar starts at the bottom of the screen, like a chat app
+    <section className="pt-2">
+      <div dir="auto" className="mb-6 flex items-start gap-2 rounded-lg border border-gold/30 bg-gold/[0.05] px-3.5 py-2.5 text-[12.5px] leading-relaxed text-gold2">
+        <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden className="mt-0.5 shrink-0">
+          <path d="M12 9v4m0 4h.01M10.3 3.9 2 18a2 2 0 0 0 1.7 3h16.6a2 2 0 0 0 1.7-3L13.7 3.9a2 2 0 0 0-3.4 0Z" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+        </svg>
+        <span>{t("chat.disclaimer")}</span>
+      </div>
+      <div className="space-y-7">
+        {turns.map((tn, i) => (
+          <ChatTurnView key={i} tn={tn} i={i} last={i === turns.length - 1} onRetry={onRetry} onResearch={onResearch} momentsLabel={momentsLabel} />
+        ))}
+      </div>
+    </section>
+  );
+}
+
+function ChatTurnView({
+  tn,
+  i,
+  last,
+  onRetry,
+  onResearch,
+  momentsLabel,
+}: {
+  tn: Turn;
+  i: number;
+  last: boolean; // the newest exchange keeps a screen's height, so a new message can scroll to the top
+  onRetry: (i: number) => void;
+  onResearch: (q: string) => void;
+  momentsLabel?: string;
+}) {
+  const { t } = useLang();
+  const [srcOpen, setSrcOpen] = useState(false);
+  const status = tn.status ?? "done";
+  const text = stripEchoedQuestion(tn.answer || "", tn.q);
+
+  // a citation opens this reply's sources and jumps to the card
+  function onCite(n: number) {
+    setSrcOpen(true);
+    // the cards mount once the list opens: wait for this one, then jump to it
+    let tries = 0;
+    const go = () => {
+      const el = document.getElementById(`chat-${i}-src-${n}`);
+      if (!el) {
+        if (++tries < 20) setTimeout(go, 50);
+        return;
+      }
+      el.scrollIntoView({ behavior: "smooth", block: "center" });
+      el.classList.add("src-hit");
+      setTimeout(() => el.classList.remove("src-hit"), 1600);
+    };
+    go();
+  }
+
+  return (
+    <div id={`chat-turn-${i}`} className={`fade-up scroll-mt-4 ${last ? "min-h-[calc(100dvh-14rem)]" : ""}`}>
+      {/* the message */}
+      <div className="flex justify-end">
+        <div dir="auto" className="max-w-[85%] whitespace-pre-wrap rounded-2xl rounded-ee-md bg-line/45 px-4 py-2.5 text-[15px] leading-relaxed text-ink">
+          {tn.q}
+        </div>
+      </div>
+
+      {/* the reply */}
+      <div className="mt-4">
+        {status === "loading" && (
+          <div>
+            <div className="relative h-0.5 w-40 overflow-hidden rounded-full bg-line sweep" />
+            <p className="mt-3 text-sm text-muted">
+              {tn.stage === "writing" ? t("chat.writing") : momentsLabel ? t("stage.2n", { n: momentsLabel }) : t("chat.searching")}…
+            </p>
+          </div>
+        )}
+        {(status === "streaming" || status === "done") && text && (
+          <article dir={answerDir(text)} className="max-w-[66ch] text-[16px] leading-[1.8] text-ink">
+            {renderAnswer(text, (n) => onCite(n))}
+            {status === "streaming" && (
+              <span className="ml-0.5 inline-block h-[1.05em] w-[2px] translate-y-[0.18em] animate-pulse bg-accent align-middle" aria-hidden />
+            )}
+          </article>
+        )}
+        {status === "error" && (
+          <div className="flex flex-wrap items-center gap-3 rounded-xl border border-danger/25 bg-danger/[0.06] px-4 py-3 text-sm text-danger">
+            <span className="min-w-0 flex-1">{tn.error || t("err.generic")}</span>
+            <button type="button" onClick={() => onRetry(i)} className="shrink-0 rounded-lg border border-danger/30 px-2.5 py-1 text-xs transition hover:bg-danger/10">
+              {t("chat.retry")}
+            </button>
+          </div>
+        )}
+
+        {/* sources chip, cost, and the hand-off to a full Research answer */}
+        {status === "done" && (
+          <div className="mt-3 flex flex-wrap items-center gap-x-3 gap-y-2 text-[12.5px]">
+            {tn.sources.length > 0 && (
+              <button
+                type="button"
+                onClick={() => setSrcOpen((o) => !o)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-raised/60 px-2.5 py-1 text-muted transition hover:border-line2 hover:text-ink"
+              >
+                {srcOpen ? t("chat.hideSources") : t("chat.sources", { n: tn.sources.length, s: tn.sources.length === 1 ? "" : "s" })}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden className={srcOpen ? "rotate-180" : ""}>
+                  <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            )}
+            <button type="button" onClick={() => onResearch(tn.q)} className="inline-flex items-center gap-1 text-accent transition hover:underline">
+              {t("chat.research")}
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden className="rtl:-scale-x-100">
+                <path d="M5 12h14m0 0-5-5m5 5-5 5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+            </button>
+            {typeof tn.cost_usd === "number" && tn.cost_usd > 0 && (
+              <span className="text-faint">≈ {aed(tn.cost_usd)}</span>
+            )}
+          </div>
+        )}
+        {status === "done" && srcOpen && tn.sources.length > 0 && (
+          <div className="mt-3 space-y-2">
+            {tn.sources.map((s) => (
+              <SourceCard key={s.n} s={s} anchor={`chat-${i}-src-${s.n}`} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
 /* Topical (synthesized, the default) vs. Verbatim (the speakers' own words, original language). */
 function StyleToggle({ value, onChange }: { value: "topical" | "verbatim"; onChange: (s: "topical" | "verbatim") => void }) {
   const { t } = useLang();
@@ -2263,7 +2802,7 @@ function buildTranscriptFile(s: Source, lines: Line[]) {
 /* A cited source. The title + timestamp (and the arrow icon) link out to the moment on YouTube;
    clicking the 3-line transcript peek opens the surrounding transcript in a scrollable panel with
    the cited line centred (cited line in full contrast, neighbours greyed). */
-function SourceCard({ s }: { s: Source }) {
+function SourceCard({ s, anchor }: { s: Source; anchor?: string }) {
   const { t } = useLang();
   const [open, setOpen] = useState(false);
   const [dl, setDl] = useState<"idle" | "loading" | "error">("idle");
@@ -2314,7 +2853,7 @@ function SourceCard({ s }: { s: Source }) {
 
   return (
     <div
-      id={`src-${s.n}`}
+      id={anchor ?? `src-${s.n}`}
       className="overflow-hidden rounded-xl border border-line bg-raised transition hover:border-line2"
     >
       <div className="flex items-start gap-3.5 px-4 py-3">

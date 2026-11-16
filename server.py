@@ -38,24 +38,29 @@ ALLOW_ORIGINS = [o.strip() for o in os.environ.get("ALLOW_ORIGINS", "*").split("
 # real IP as X-Client-IP so the per-person limit works even though every call arrives from Vercel.
 MAX_PER_DAY = int(os.environ.get("MAX_PER_DAY", "300"))        # total questions across everyone / UTC day
 MAX_PER_IP_HOUR = int(os.environ.get("MAX_PER_IP_HOUR", "30"))  # questions per visitor per hour
-_RATE = {"lock": threading.Lock(), "day": "", "day_count": 0, "ip": {}}
+# Chat messages are far cheaper than a Research answer, so they have their own, roomier counters.
+MAX_CHAT_PER_DAY = int(os.environ.get("MAX_CHAT_PER_DAY", "1500"))
+MAX_CHAT_PER_IP_HOUR = int(os.environ.get("MAX_CHAT_PER_IP_HOUR", "120"))
+_RATE = {"lock": threading.Lock(), "day": "", "day_count": 0, "ip": {}, "chat_count": 0, "chat_ip": {}}
 
 
-def _rate_limited(ip):
+def _rate_limited(ip, chat=False):
     """Returns a message if this request should be blocked, else None (and records the hit)."""
     now = time.time()
     today = time.strftime("%Y-%m-%d", time.gmtime(now))
+    count_key, ip_key = ("chat_count", "chat_ip") if chat else ("day_count", "ip")
+    day_max, hour_max = (MAX_CHAT_PER_DAY, MAX_CHAT_PER_IP_HOUR) if chat else (MAX_PER_DAY, MAX_PER_IP_HOUR)
     with _RATE["lock"]:
         if _RATE["day"] != today:
-            _RATE.update({"day": today, "day_count": 0, "ip": {}})
-        if _RATE["day_count"] >= MAX_PER_DAY:
+            _RATE.update({"day": today, "day_count": 0, "ip": {}, "chat_count": 0, "chat_ip": {}})
+        if _RATE[count_key] >= day_max:
             return "The archive has reached today's question limit. Please try again tomorrow."
-        hits = [t for t in _RATE["ip"].get(ip, []) if now - t < 3600]
-        if len(hits) >= MAX_PER_IP_HOUR:
+        hits = [t for t in _RATE[ip_key].get(ip, []) if now - t < 3600]
+        if len(hits) >= hour_max:
             return "That's a lot of questions in a short time - please pause a bit and try again."
         hits.append(now)
-        _RATE["ip"][ip] = hits
-        _RATE["day_count"] += 1
+        _RATE[ip_key][ip] = hits
+        _RATE[count_key] += 1
         return None
 
 
@@ -167,6 +172,8 @@ class AskRequest(BaseModel):
     cand_max: int | None = None        # admin "custom" depth: moments to read in (clamped in the brain)
     answer_max: int | None = None      # admin "custom" depth: answer length in tokens (clamped)
     fresh: bool | None = None          # true = skip the answer cache and write a new answer
+    chat: bool | None = None           # true = chat mode: a short conversational reply (not cached)
+    history: list[dict[str, str]] | None = None  # chat: the conversation so far, [{role, content}]
 
 
 # Answer cache: the same question (same words, channels, depth and style) asked again is served from the
@@ -274,6 +281,20 @@ def _run_job(job, ctx, q, req):
             job["cond"].notify_all()
 
     try:
+        if req.chat:  # chat: depends on the conversation, so never cached
+            for kind, payload in brain.chat_answer_stream(ctx, q, history=req.history, channels=req.channels,
+                                                          mode=req.mode, channel_names=req.channel_names):
+                if kind == "status":
+                    put("status", {"stage": payload})
+                elif kind == "delta":
+                    put("delta", {"text": payload})
+                elif kind == "source":
+                    put("source", payload)
+                elif kind == "done":
+                    brain.add_spend("claude", payload["usd"], "web chat")
+                    put("done", {"coverage": payload["coverage"], "cost_usd": round(payload["usd"], 4),
+                                 "relevant": payload.get("relevant") or []})
+            return
         hit = _cache_get(ctx, req, q)
         if hit:  # asked before with the same data: replay the saved answer, no Claude call
             put("status", {"stage": "writing"})
@@ -340,7 +361,7 @@ def ask_stream(req: AskRequest, request: Request, x_brain_key: str = Header(None
     if not q:
         raise HTTPException(status_code=400, detail="empty question")
     ip = (x_client_ip or (request.client.host if request.client else "") or "unknown").split(",")[0].strip()
-    blocked = _rate_limited(ip)
+    blocked = _rate_limited(ip, chat=bool(req.chat))
     if blocked:
         raise HTTPException(status_code=429, detail=blocked)
     now = time.time()
