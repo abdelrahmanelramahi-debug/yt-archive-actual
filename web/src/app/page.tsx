@@ -962,6 +962,9 @@ export default function Home() {
     let fin: { coverage?: Coverage; cost?: number } | null = null;
     let failed: string | null = null;
     let raf = false;
+    // once the reply is finished, a text redraw still waiting for the next frame must not land:
+    // it would flip the turn back to "streaming" and leave the message bar locked
+    let ended = false;
     const on = (ev: string, obj: Record<string, unknown>) => {
       if (ev === "job") {
         st.jobId = typeof obj.id === "string" ? obj.id : null;
@@ -975,7 +978,7 @@ export default function Home() {
           raf = true;
           requestAnimationFrame(() => {
             raf = false;
-            upd({ status: "streaming", answer: st.acc });
+            if (!ended) upd({ status: "streaming", answer: st.acc });
           });
         }
       } else if (ev === "source") st.srcs.push(obj as unknown as Source);
@@ -1040,6 +1043,7 @@ export default function Home() {
         /* still offline: try again */
       }
     }
+    ended = true;
     if (failed) {
       upd({ status: "error", error: failed });
       return;

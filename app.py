@@ -4488,6 +4488,7 @@ Write a COMPREHENSIVE, well-organised answer - a thorough briefing, not a summar
 - Attribute every point to the channel that said it (name the speaker too only when the finding makes it clear; don't invent names). Different channels and speakers may hold different views.
 - Do NOT flatten those differences: where they disagree, lay out each position distinctly under its own channel. Do not resolve the disagreement, harmonise them, pick a side, or add a ruling of your own. You are reporting what was said, not giving a fatwa.
 - If the findings genuinely don't answer the question, say so plainly. Don't fill gaps from outside knowledge.
+- Cite EVERY point you take from the excerpts, not only rulings: put its excerpt number in square brackets right after it, like [3] or [3, 7].
 - Write only about what the channels said. NEVER mention the findings, excerpts, notes, numbering, truncation, missing citations or how the material was gathered (no "the finding does not say...", "his excerpt is truncated", "only what the findings support"). A point you can't attribute or cite is simply left out, silently.
 - {language}
 
@@ -4757,6 +4758,13 @@ def load_search(settings, scope):
         vid_cid = np.array([row_cid[rows_by_vid[v][0]] for v in vid_ids], dtype=np.int32)
         vid_rows = {v: np.array(r, dtype=np.int64) for v, r in rows_by_vid.items()}
     lowered = [(c["title"] + " " + c["text"]).lower() for c in chunks]
+    # every video's title, for Chat's "which videos / series / lessons exist" questions (the moment
+    # search reads what was said, never the titles): (normalised title, title, slug, channel, date, id)
+    catalog, seen_v = [], set()
+    for c in chunks:
+        if c["video_id"] not in seen_v:
+            seen_v.add(c["video_id"])
+            catalog.append((norm_text(c["title"]), c["title"], c["_slug"], c["channel"], c.get("date") or "", c["video_id"]))
     embedder = get_embedder(model_name) if mat is not None else None
     kw_count, kw_videos = 0, 0
     for ch in kw_scope:
@@ -4764,6 +4772,9 @@ def load_search(settings, scope):
             con = kw_db(ch)
             n = con.execute("SELECT count(*) FROM info").fetchone()[0]
             v = con.execute("SELECT count(DISTINCT video_id) FROM info").fetchone()[0]
+            name = full_name(ch)
+            for vid, title, date in con.execute("SELECT video_id, MIN(title), MIN(date) FROM info GROUP BY video_id"):
+                catalog.append((norm_text(title or ""), title or "", ch["slug"], name, date or "", vid))
             con.close()
             kw_count += n
             kw_videos += v
@@ -4783,6 +4794,7 @@ def load_search(settings, scope):
             "row_cid": row_cid, "slug_to_cid": slug_to_cid,
             "vid_ids": vid_ids, "vid_mat": vid_mat, "vid_rows": vid_rows, "vid_cid": vid_cid,
             "quote_db": QUOTE_DB if QUOTE_DB.exists() else None,  # Quran / hadith per moment, read on demand
+            "catalog": catalog,
             "channels_meta": [{"slug": c["slug"], "name": full_name(c),
                                "kind": "keyword" if c.get("search") == "keyword" else "meaning",
                                "moments": counts.get(c["slug"], (0, 0))[0],
@@ -4805,6 +4817,10 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False, angle
     model_name = ctx["model_name"]
     sel = set(channels) if channels else None  # selected channel slugs, or None for all
     sel_ids = [cid for s, cid in ctx["slug_to_cid"].items() if s in sel] if sel else None
+    kw_scope = [ch for ch in ctx["kw_scope"] if not sel or ch["slug"] in sel]
+    # the Arabic keyword terms (a Claude call) don't depend on the meaning search: fetch them meanwhile
+    kw_pool = ThreadPoolExecutor(max_workers=1) if kw_scope else None
+    kw_terms = kw_pool.submit(keyword_terms, anth, settings["tag_model"], q) if kw_pool else None
     queries = _decompose(anth, settings["tag_model"], q) if angles else [q]  # the question broken into several search angles
     sem_hits, qvs = [], []
     if mat is not None:
@@ -4827,13 +4843,16 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False, angle
                     best[int(i)] = sc
         sem_hits = [chunks[i] for i, _ in sorted(best.items(), key=lambda kv: -kv[1])]
     kw_hits = []
-    kw_scope = [ch for ch in ctx["kw_scope"] if not sel or ch["slug"] in sel]
     if kw_scope:
-        terms = keyword_terms(anth, settings["tag_model"], q) + queries
+        terms = kw_terms.result() + queries
+        kw_pool.shutdown(wait=False)
         per = max(40, 160 // len(kw_scope))
         lists = []
-        for ch in kw_scope:
-            hits = kw_search(ch, terms, per)
+        # each channel is its own SQLite file: search them side by side (one at a time took up to 30 s
+        # on a cold disk); the results keep the channel order, so the interleave below is unchanged
+        with ThreadPoolExecutor(max_workers=min(8, len(kw_scope))) as ex:
+            found = list(ex.map(lambda ch: kw_search(ch, terms, per), kw_scope))
+        for ch, hits in zip(kw_scope, found):
             nm = full_name(ch)  # current display name, so a rename shows without re-indexing
             for h in hits:
                 h["channel"] = nm
@@ -5019,20 +5038,24 @@ Rules:
 - If the excerpts don't address what was asked, say plainly that the archive's channels don't seem to cover it, and suggest running a full Research search on it. Don't guess.
 - Your earlier replies in this conversation were grounded in the excerpts sent with those earlier messages, which are not shown again. Treat what they reported as established - never retract or second-guess them just because the newest excerpts don't repeat it - and you may refer back to them (without citation numbers).
 - Where channels or speakers differ, say so and give each position; don't pick a side, harmonise them, or add your own verdict.
+- Questions about which videos, lessons or series exist (how many, how they are numbered, which channel) are answered from the list of archive videos whose TITLES match, when one is sent. State its counts and numbering exactly as listed, name the series by its title, and don't put excerpt numbers on those facts. If no titles match, say the archive doesn't seem to have it - never infer a series from lesson numbers that happen to appear inside other videos.
 - Things that are not rulings are fine to help with directly: clarifying or rephrasing an earlier reply, defining a term, summarising, a greeting - briefly, and without adding religious claims beyond the excerpts.
 - Be conversational and to the point: a few short paragraphs at most, bullets only when listing. No headings unless asked for a breakdown. No introduction or sign-off.
 - Write only about what the channels said. Never mention "excerpts", "clips", numbering, searching, captions being cut off, or how the material was gathered - if a speaker's conclusion isn't there, just say he didn't state one. The captions are auto-generated, so names and Arabic terms can be garbled.
 - {language}"""
 
-CHAT_QUERY_PROMPT = """You prepare archive searches for a chat about Islamic topics. Below is the conversation so far and the user's newest message.
-Write ONE standalone search question that captures what the newest message is asking, resolving words like "it", "that" or "what about..." from the conversation. Keep the language of the newest message.
-If the newest message needs no search at all (a greeting, thanks, or a request to reword, shorten, translate or explain the assistant's previous reply), reply with exactly: NONE
-Reply with only the search question, or NONE.
+CHAT_QUERY_PROMPT = """You prepare archive searches for a chat about Islamic topics. The archive is YouTube lectures and Q&A; it can be searched two ways: by what was SAID in the videos, and by video TITLES.
+Given the conversation so far and the user's newest message, reply with JSON only, in this shape:
+{{"search": "...", "titles": ["...", "..."]}}
+- "search": ONE standalone search question for what was said, capturing what the newest message asks (resolve "it", "that", "what about..." from the conversation; keep the message's language). Use null if no search is needed (a greeting, thanks, or a request to reword, shorten, translate or explain the previous reply).
+- "titles": if the message is about which videos, lessons, series, lectures or book explanations (sharh) exist, or a speaker's lessons on a book or subject, give 1-4 short distinctive phrases likely to appear in those video titles, in Arabic and in English spelling (e.g. a book's name: "الآجرومية", "Ajurrumiyyah"). No generic words alone (lesson, explanation, sheikh) and not the speaker's name alone. Otherwise [].
 
 Conversation:
 {history}
 
 Newest message: {q}"""
+
+CATALOG_GROUPS = 12  # title-search results shown to Chat: series (or single videos), most videos first
 
 
 def _chat_history(history):
@@ -5059,18 +5082,70 @@ def _chat_history(history):
 
 
 def _chat_search_query(anth, model, q, history):
-    """The newest message as a standalone search question ('' = no search needed), and its cost."""
-    if not history:
-        return q, 0.0
-    convo = "\n".join(f"{h['role'].upper()}: {h['content'][:1500]}" for h in history[-6:])
+    """What to look up for the newest message: (search question or '' for none, title phrases, cost)."""
+    convo = "\n".join(f"{h['role'].upper()}: {h['content'][:1500]}" for h in history[-6:]) or "(none)"
     try:
-        txt, usd = call_claude(anth, model, CHAT_QUERY_PROMPT.format(history=convo, q=q), 200)
+        txt, usd = call_claude(anth, model, CHAT_QUERY_PROMPT.format(history=convo, q=q), 300)
     except Exception:
-        return q, 0.0
-    txt = txt.strip().strip('"')
-    if txt.upper() == "NONE":
-        return "", usd
-    return (txt.splitlines()[0].strip() if txt else q) or q, usd
+        return q, [], 0.0
+    m = re.search(r"\{.*\}", txt, re.S)
+    try:
+        d = json.loads(m.group(0)) if m else {}
+    except ValueError:
+        d = {}
+    if not isinstance(d, dict) or not d:
+        return q, [], usd  # unreadable reply: just search the message as written
+    search, titles = d.get("search"), d.get("titles")
+    search = search.strip() if isinstance(search, str) else ""
+    titles = [t.strip() for t in titles if isinstance(t, str) and t.strip()][:4] if isinstance(titles, list) else []
+    return search, titles, usd
+
+
+def catalog_search(ctx, phrases, channels=None):
+    """Videos whose TITLES contain any of the phrases (every word of a phrase, after Arabic
+    normalisation), grouped into series: same channel + the title without its lesson number.
+    Returns [{channel, title, count, numbers, missing, first, last, video_id}], biggest first."""
+    allowed = set(channels) if channels else None
+    terms = [t for t in (norm_text(p).split() for p in phrases) if t]
+    if not terms:
+        return []
+    groups = {}
+    for nt, title, slug, chan, date, vid in ctx.get("catalog") or []:
+        if allowed is not None and slug not in allowed:
+            continue
+        words = set(nt.split())
+        if not any(all(x in words for x in t) for t in terms):
+            continue
+        num = re.match(r"\s*(\d{1,4})\s*[-–.)_]", title) or re.search(r"(\d{1,4})\s*\)?\s*$", title)
+        stem = re.sub(r"^\s*\d{1,4}\s*[-–.)_]*\s*|\s*[-–(#]?\s*\d{1,4}\s*\)?\s*$", "", title).strip() or title
+        g = groups.setdefault((slug, stem), {"channel": chan, "title": stem, "nums": set(), "dates": [], "vids": []})
+        if num:
+            g["nums"].add(int(num.group(1)))
+        g["dates"].append(date)
+        g["vids"].append(vid)
+    out = []
+    for g in sorted(groups.values(), key=lambda g: -len(g["vids"]))[:CATALOG_GROUPS]:
+        nums = sorted(g["nums"])
+        missing = [n for n in range(nums[0], nums[-1] + 1) if n not in g["nums"]] if len(nums) > 1 else []
+        ds = sorted(d for d in g["dates"] if d)
+        out.append({"channel": g["channel"], "title": g["title"], "count": len(g["vids"]),
+                    "numbers": [nums[0], nums[-1]] if len(nums) > 1 else nums, "missing": missing[:30],
+                    "first": ds[0] if ds else "", "last": ds[-1] if ds else "", "video_id": g["vids"][0]})
+    return out
+
+
+def _catalog_block(found):
+    """The title-search results as plain lines for the Chat prompt."""
+    lines = []
+    for g in found:
+        bits = [g["channel"], f'"{g["title"]}"', f"{g['count']} video{'s' if g['count'] != 1 else ''}"]
+        if len(g["numbers"]) == 2 and g["count"] > 1:
+            bits.append(f"numbered {g['numbers'][0]} to {g['numbers'][1]}"
+                        + (f" (missing from the archive: {', '.join(map(str, g['missing']))})" if g["missing"] else ""))
+        if g["first"]:
+            bits.append(g["first"] if g["first"] == g["last"] else f"uploaded {g['first']} to {g['last']}")
+        lines.append("- " + " | ".join(bits))
+    return "\n".join(lines)
 
 
 def chat_answer_stream(ctx, q, history=None, channels=None, mode=None, channel_names=None):
@@ -5082,19 +5157,26 @@ def chat_answer_stream(ctx, q, history=None, channels=None, mode=None, channel_n
     anth, settings = ctx["anth"], ctx["settings"]
     hist = _chat_history(history)
     yield ("status", "searching")
-    search_q, usd = _chat_search_query(anth, settings["tag_model"], q, hist)
+    search_q, title_terms, usd = _chat_search_query(anth, settings["tag_model"], q, hist)
     candidates = []
     if search_q:
         candidates, _ = retrieve(ctx, search_q, channels=channels, cand_max=cmax, per_vid=per_vid,
                                  route=route, angles=False)
         candidates = _apply_channel_names(ctx, q, candidates, channel_names)
+    found = catalog_search(ctx, title_terms, channels) if title_terms else []
+    parts = []
+    if found:
+        parts.append("Archive videos whose TITLES match my message (grouped into series):\n" + _catalog_block(found))
+    elif title_terms:
+        parts.append("(No video titles in the archive match: " + ", ".join(title_terms) + ".)")
     if candidates:
-        block = "\n\n".join(_numbered_excerpts(candidates))
-        newest = f"Archive excerpts for my newest message:\n\n{block}\n\nMy message: {q}"
+        parts.append("Archive excerpts for my newest message:\n\n" + "\n\n".join(_numbered_excerpts(candidates)))
     elif search_q:
-        newest = f"(The archive search found nothing for this message.)\n\nMy message: {q}"
-    else:
-        newest = q
+        parts.append("(The search of what was said found nothing for this message.)")
+    # a short reminder right next to the message: rules stated only at the top fade in a long conversation
+    reminder = ("(Reply by the rules: rulings only from these; put the excerpt number like [3] after every point "
+                "taken from them; never mention excerpts, clips, or that anything is cut off.)")
+    newest = "\n\n".join(parts + [reminder, f"My message: {q}"]) if parts else q
     yield ("status", "writing")
     answer = ""
     for kind, payload in call_claude_stream(anth, settings["answer_model"], None, writer_max_tokens(reply_max),
