@@ -290,6 +290,8 @@ def _run_job(job, ctx, q, req):
                     put("delta", {"text": payload})
                 elif kind == "source":
                     put("source", payload)
+                elif kind == "videos":  # title-search matches, listed as links under the reply
+                    put("videos", {"groups": payload})
                 elif kind == "done":
                     brain.add_spend("claude", payload["usd"], "web chat")
                     put("done", {"coverage": payload["coverage"], "cost_usd": round(payload["usd"], 4),

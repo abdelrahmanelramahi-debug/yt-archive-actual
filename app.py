@@ -5038,7 +5038,8 @@ Rules:
 - If the excerpts don't address what was asked, say plainly that the archive's channels don't seem to cover it, and suggest running a full Research search on it. Don't guess.
 - Your earlier replies in this conversation were grounded in the excerpts sent with those earlier messages, which are not shown again. Treat what they reported as established - never retract or second-guess them just because the newest excerpts don't repeat it - and you may refer back to them (without citation numbers).
 - Where channels or speakers differ, say so and give each position; don't pick a side, harmonise them, or add your own verdict.
-- Questions about which videos, lessons or series exist (how many, how they are numbered, which channel) are answered from the list of archive videos whose TITLES match, when one is sent. State its counts and numbering exactly as listed, name the series by its title, and don't put excerpt numbers on those facts. If no titles match, say the archive doesn't seem to have it - never infer a series from lesson numbers that happen to appear inside other videos.
+- Questions about which videos, lessons or series exist (how many, how they are numbered, which channel) are answered from the list of archive videos whose TITLES match, when one is sent. State its counts and numbering exactly as listed, name the series by its title, and don't put excerpt numbers on those facts. If no titles match, say the archive doesn't seem to have it - never infer a series from lesson numbers that happen to appear inside other videos. When asked to list the videos, list their titles from it - but if the titles differ only by lesson number, don't write each one out: give the series title and which lesson numbers are there. The user also gets every video as a tappable link in a list below your reply, so say so and don't paste links.
+- Never point the user to pages, features or details that weren't given to you here - there is no "series page", and you don't know video durations, view counts or anything not in this conversation.
 - Things that are not rulings are fine to help with directly: clarifying or rephrasing an earlier reply, defining a term, summarising, a greeting - briefly, and without adding religious claims beyond the excerpts.
 - Be conversational and to the point: a few short paragraphs at most, bullets only when listing. No headings unless asked for a breakdown. No introduction or sign-off.
 - Write only about what the channels said. Never mention "excerpts", "clips", numbering, searching, captions being cut off, or how the material was gathered - if a speaker's conclusion isn't there, just say he didn't state one. The captions are auto-generated, so names and Arabic terms can be garbled.
@@ -5104,7 +5105,8 @@ def _chat_search_query(anth, model, q, history):
 def catalog_search(ctx, phrases, channels=None):
     """Videos whose TITLES contain any of the phrases (every word of a phrase, after Arabic
     normalisation), grouped into series: same channel + the title without its lesson number.
-    Returns [{channel, title, count, numbers, missing, first, last, video_id}], biggest first."""
+    Returns [{channel, title, count, numbers, missing, first, last, videos}], biggest first; `videos`
+    is each video in lesson order: {n, title, date, url}."""
     allowed = set(channels) if channels else None
     terms = [t for t in (norm_text(p).split() for p in phrases) if t]
     if not terms:
@@ -5122,21 +5124,27 @@ def catalog_search(ctx, phrases, channels=None):
         if num:
             g["nums"].add(int(num.group(1)))
         g["dates"].append(date)
-        g["vids"].append(vid)
+        g["vids"].append((int(num.group(1)) if num else None, title, date, vid))
     out = []
     for g in sorted(groups.values(), key=lambda g: -len(g["vids"]))[:CATALOG_GROUPS]:
         nums = sorted(g["nums"])
         missing = [n for n in range(nums[0], nums[-1] + 1) if n not in g["nums"]] if len(nums) > 1 else []
         ds = sorted(d for d in g["dates"] if d)
-        out.append({"channel": g["channel"], "title": g["title"], "count": len(g["vids"]),
+        vids = sorted(g["vids"], key=lambda v: (v[0] is None, v[0] or 0, v[2], v[1]))
+        out.append({"channel": g["channel"], "title": g["title"], "count": len(vids),
                     "numbers": [nums[0], nums[-1]] if len(nums) > 1 else nums, "missing": missing[:30],
-                    "first": ds[0] if ds else "", "last": ds[-1] if ds else "", "video_id": g["vids"][0]})
+                    "first": ds[0] if ds else "", "last": ds[-1] if ds else "",
+                    "videos": [{"n": n, "title": t, "date": d, "url": f"https://youtu.be/{v}"} for n, t, d, v in vids]})
     return out
 
 
+CATALOG_LIST_MAX = 150  # videos listed one by one in the Chat prompt (the page shows them all as links)
+
+
 def _catalog_block(found):
-    """The title-search results as plain lines for the Chat prompt."""
-    lines = []
+    """The title-search results as plain lines for the Chat prompt: each series, then its videos one
+    by one while they fit."""
+    lines, listed = [], 0
     for g in found:
         bits = [g["channel"], f'"{g["title"]}"', f"{g['count']} video{'s' if g['count'] != 1 else ''}"]
         if len(g["numbers"]) == 2 and g["count"] > 1:
@@ -5145,6 +5153,9 @@ def _catalog_block(found):
         if g["first"]:
             bits.append(g["first"] if g["first"] == g["last"] else f"uploaded {g['first']} to {g['last']}")
         lines.append("- " + " | ".join(bits))
+        if g["count"] > 1 and listed + g["count"] <= CATALOG_LIST_MAX:
+            listed += g["count"]
+            lines += [f"    * {v['title']}" + (f" ({v['date']})" if v["date"] else "") for v in g["videos"]]
     return "\n".join(lines)
 
 
@@ -5164,9 +5175,13 @@ def chat_answer_stream(ctx, q, history=None, channels=None, mode=None, channel_n
                                  route=route, angles=False)
         candidates = _apply_channel_names(ctx, q, candidates, channel_names)
     found = catalog_search(ctx, title_terms, channels) if title_terms else []
+    if found:  # the page lists these as links under the reply
+        yield ("videos", [{"channel": g["channel"], "title": g["title"], "count": g["count"],
+                           "videos": g["videos"][:200]} for g in found])
     parts = []
     if found:
-        parts.append("Archive videos whose TITLES match my message (grouped into series):\n" + _catalog_block(found))
+        parts.append("Archive videos whose TITLES match my message (grouped into series; the page also shows "
+                     "them to me below your reply as a list of links):\n" + _catalog_block(found))
     elif title_terms:
         parts.append("(No video titles in the archive match: " + ", ".join(title_terms) + ".)")
     if candidates:

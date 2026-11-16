@@ -31,11 +31,15 @@ type ChatDoc = {
   turns?: Turn[];
 };
 
+// archive videos whose titles matched a Chat message, grouped into series (listed as links)
+type VideoGroup = { channel: string; title: string; count: number; videos: { n: number | null; title: string; date: string; url: string }[] };
+
 // one exchange in a Chat conversation
 type Turn = {
   q: string;
   answer: string;
   sources: Source[];
+  videos?: VideoGroup[];
   coverage?: Coverage;
   cost_usd?: number | null;
   status?: "loading" | "streaming" | "done" | "error";
@@ -894,6 +898,7 @@ export default function Home() {
         q: tn.q,
         answer: tn.answer,
         sources: tn.sources.map((s) => lightSource(s, i >= ctxFrom)),
+        ...(tn.videos?.length ? { videos: tn.videos } : {}),
         coverage: tn.coverage ?? EMPTY_COV,
         cost_usd: tn.cost_usd ?? null,
       }));
@@ -958,7 +963,7 @@ export default function Home() {
         { role: "assistant", content: tn.answer },
       ]),
     };
-    const st = { acc: "", srcs: [] as Source[], seen: 0, jobId: null as string | null };
+    const st = { acc: "", srcs: [] as Source[], videos: [] as VideoGroup[], seen: 0, jobId: null as string | null };
     let fin: { coverage?: Coverage; cost?: number } | null = null;
     let failed: string | null = null;
     let raf = false;
@@ -982,6 +987,10 @@ export default function Home() {
           });
         }
       } else if (ev === "source") st.srcs.push(obj as unknown as Source);
+      else if (ev === "videos") {
+        st.videos = Array.isArray(obj.groups) ? (obj.groups as VideoGroup[]) : [];
+        upd({ videos: st.videos });
+      }
       else if (ev === "done" || ev === "empty") {
         fin = { coverage: obj.coverage as Coverage | undefined, cost: obj.cost_usd as number | undefined };
         return true;
@@ -1057,6 +1066,7 @@ export default function Home() {
       q: text,
       answer: st.acc,
       sources: st.srcs,
+      ...(st.videos.length ? { videos: st.videos } : {}),
       coverage: done?.coverage ?? EMPTY_COV,
       cost_usd: done?.cost ?? null,
       status: "done",
@@ -2435,7 +2445,9 @@ function ChatTurnView({
 }) {
   const { t } = useLang();
   const [srcOpen, setSrcOpen] = useState(false);
+  const [vidOpen, setVidOpen] = useState(false);
   const status = tn.status ?? "done";
+  const nVideos = (tn.videos ?? []).reduce((n, g) => n + g.videos.length, 0);
   const text = stripEchoedQuestion(tn.answer || "", tn.q);
 
   // a citation opens this reply's sources and jumps to the card
@@ -2507,6 +2519,18 @@ function ChatTurnView({
                 </svg>
               </button>
             )}
+            {nVideos > 0 && (
+              <button
+                type="button"
+                onClick={() => setVidOpen((o) => !o)}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-line bg-raised/60 px-2.5 py-1 text-muted transition hover:border-line2 hover:text-ink"
+              >
+                {vidOpen ? t("chat.hideVideos") : t("chat.videos", { n: nVideos, s: nVideos === 1 ? "" : "s" })}
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden className={vidOpen ? "rotate-180" : ""}>
+                  <path d="m6 9 6 6 6-6" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
+                </svg>
+              </button>
+            )}
             <button type="button" onClick={() => onResearch(tn.q)} className="inline-flex items-center gap-1 text-accent transition hover:underline">
               {t("chat.research")}
               <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden className="rtl:-scale-x-100">
@@ -2518,6 +2542,7 @@ function ChatTurnView({
             )}
           </div>
         )}
+        {status === "done" && vidOpen && nVideos > 0 && <VideoList groups={tn.videos ?? []} />}
         {status === "done" && srcOpen && tn.sources.length > 0 && (
           <div className="mt-3 space-y-2">
             {tn.sources.map((s) => (
@@ -2526,6 +2551,45 @@ function ChatTurnView({
           </div>
         )}
       </div>
+    </div>
+  );
+}
+
+/* The archive videos whose titles matched a Chat message: each series with its videos in lesson
+   order, every one a link to the video on YouTube. */
+function VideoList({ groups }: { groups: VideoGroup[] }) {
+  const { t } = useLang();
+  return (
+    <div className="mt-3 space-y-3">
+      {groups.map((g, gi) => (
+        <div key={gi} className="overflow-hidden rounded-xl border border-line bg-raised">
+          <div dir="auto" className="border-b border-line px-4 py-2.5">
+            <p className="text-sm text-ink">{g.title}</p>
+            <p className="mt-0.5 text-xs text-faint">
+              {g.channel} · {t("chat.videos", { n: g.count, s: g.count === 1 ? "" : "s" })}
+            </p>
+          </div>
+          <ul className="max-h-80 divide-y divide-line overflow-y-auto">
+            {g.videos.map((v, vi) => (
+              <li key={vi}>
+                <a
+                  href={v.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-3 px-4 py-2 text-[13px] transition hover:bg-paper"
+                >
+                  <span className="w-7 shrink-0 font-serif tabular-nums text-gold">{v.n ?? "·"}</span>
+                  <span dir="auto" className="min-w-0 flex-1 truncate text-ink">
+                    {/* the number is already in the gold column */}
+                    {v.n != null ? v.title.replace(/^\s*\d{1,4}\s*[-–.)_]*\s*/, "") || v.title : v.title}
+                  </span>
+                  {v.date && <span className="shrink-0 text-xs text-faint">{v.date}</span>}
+                </a>
+              </li>
+            ))}
+          </ul>
+        </div>
+      ))}
     </div>
   );
 }
