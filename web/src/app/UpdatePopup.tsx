@@ -67,6 +67,12 @@ const Plug = (
 // entries stay as flip-back pages. The id of the top entry is what "seen" is tracked against.
 const UPDATES: { id: string; items: { key: string; icon: ReactNode }[] }[] = [
   {
+    id: "2026-11-17c",
+    items: [
+      { key: "claude2", icon: Plug },
+    ],
+  },
+  {
     id: "2026-11-17b",
     items: [
       { key: "claude", icon: Plug },

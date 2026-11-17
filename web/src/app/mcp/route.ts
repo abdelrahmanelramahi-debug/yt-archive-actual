@@ -1,12 +1,15 @@
 import { NextRequest, NextResponse } from "next/server";
 import { siteOrigin, verifyAccess, metadataUrl, MCP_SCOPE, type Grant } from "../../lib/mcp-auth";
-import { consumeMcp, isAdminEmail } from "../../lib/firebase-admin";
+import { consumeMcp, consumeDaily, getMcpGen, isAdminEmail } from "../../lib/firebase-admin";
 import { allowedChannels, channelNameOverrides } from "../../lib/channels";
+import { research, historyList, historyOpen, toolText, type ToolResult } from "../../lib/mcp-research";
 
 // The Claude connector: an MCP server (Streamable HTTP, stateless, JSON replies) that lets an account's
-// own Claude search the archive. Every request needs a La Tafti access token; without one Claude gets a
-// 401 pointing at the sign-in metadata and starts the sign-in. Tool calls count against the account's
-// daily connector allowance and stay within the channels it may see; the brain does the searching.
+// own Claude do what the account can do on the website: search the archive, find videos, read
+// transcripts, have La Tafti write a full Research answer, and look back through its history. Every
+// request needs a La Tafti access token; without one Claude gets a 401 pointing at the sign-in metadata
+// and starts the sign-in. Searches count against the account's daily connector allowance, Research
+// against its daily answers; everything stays within the channels it may see. The brain does the work.
 
 const BRAIN_URL = process.env.BRAIN_URL || "http://127.0.0.1:8000";
 const BRAIN_KEY = process.env.BRAIN_KEY || "";
@@ -15,11 +18,13 @@ const PROTOCOLS = ["2025-11-25", "2025-06-18", "2025-03-26", "2024-11-05"];
 
 const INSTRUCTIONS = `La Tafti (لا تفتي, "don't issue fatwas") is a searchable archive of Islamic scholars' lectures, lessons and Q&A sessions, transcribed from tens of thousands of videos in Arabic and English. Use it whenever the user asks what the scholars say about a ruling, a topic, a hadith or a book.
 
-Searching well:
-- Call search_lectures a few times from different angles, and always give arabic_terms: the Arabic words a scholar would actually say. Many channels are matched only by their exact Arabic words.
-- Use find_videos when the user names a book, a lesson series or a lecture, and read_transcript to read around a passage before relying on it.
+Choose the tool that fits the question:
+- search_lectures for most questions: you read the passages and answer yourself. It is quick and doesn't use the account's daily answers. Call it a few times from different angles, and always give arabic_terms (the Arabic words a scholar would actually say): many channels are matched only by their exact Arabic words.
+- research when the user wants La Tafti's own full answer: a thorough, cited survey of what the scholars say, or they ask for "research", "deep" or "verbatim". It reads hundreds of moments and takes a minute or more, and each one uses one of the account's daily answers, so don't use it for a quick lookup. Pick the depth from the question: quick for a narrow point, standard by default, deep for broad or disputed topics. If it says it's still writing, call check_research with its job_id.
+- find_videos when the user names a book, a lesson series or a lecture; read_transcript to read around a passage before relying on it.
+- my_history and open_saved when the user refers to something they asked La Tafti before.
 
-Answering: base any ruling only on what the scholars say in the passages, say which scholar said what, and link each point to its passage's URL. Don't give rulings from your own knowledge. If the archive doesn't cover the question, say so plainly instead of filling the gap.`;
+Answering: base any ruling only on what the scholars say, say which scholar said what, and link each point to its source's URL. Don't give rulings from your own knowledge. If the archive doesn't cover the question, say so plainly instead of filling the gap.`;
 
 const CHANNELS_ARG = {
   type: "array",
@@ -33,7 +38,7 @@ const TOOLS = [
     name: "search_lectures",
     title: "Search the scholars' lectures",
     description:
-      "Search what the scholars actually said across the archive's transcribed lectures and Q&A (Arabic and English). Returns passages of speech, best first, each with the channel, video title, date, a YouTube link that opens at that moment, and a video_id. Matches by meaning and by exact words. For a thorough answer, call it a few times from different angles.",
+      "Search what the scholars actually said across the archive's transcribed lectures and Q&A (Arabic and English). Returns passages of speech, best first, each with the channel, video title, date, a YouTube link that opens at that moment, and a video_id. Matches by meaning and by exact words. Quick, and doesn't use the account's daily answers: the default way to answer a question yourself. For a thorough answer, call it a few times from different angles.",
     inputSchema: {
       type: "object",
       properties: {
@@ -96,6 +101,64 @@ const TOOLS = [
     annotations: { title: "Read a video's transcript", ...READ_ONLY },
   },
   {
+    name: "research",
+    title: "Write a La Tafti Research answer",
+    description:
+      "Have La Tafti write its full Research answer, exactly as on latafti.com: it reads up to hundreds of moments across the channels and writes a long briefing of what the scholars say, every point cited with its numbered source. Use it when the user wants a thorough survey or La Tafti's own answer, not for quick lookups (search_lectures is for those). Takes from about 30 seconds (quick) to a few minutes (deep), and uses one of the account's daily answers. If it isn't finished within about a minute you get a job_id: call check_research with it.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        question: { type: "string", description: "The question, in English or Arabic, as the user would ask it on the website." },
+        depth: {
+          type: "string",
+          enum: ["quick", "standard", "deep"],
+          default: "standard",
+          description: "quick: about 120 moments, ~30 s, for a narrow point. standard: about 500 moments, a minute or two, the default. deep: about 1,000 moments, a few minutes, for broad or disputed questions.",
+        },
+        style: {
+          type: "string",
+          enum: ["topical", "verbatim"],
+          default: "topical",
+          description: "topical: organised by point (default). verbatim: grouped by scholar, quoting their own words.",
+        },
+        channels: CHANNELS_ARG,
+      },
+      required: ["question"],
+    },
+    annotations: { title: "Write a La Tafti Research answer", readOnlyHint: false, destructiveHint: false, idempotentHint: false, openWorldHint: false },
+  },
+  {
+    name: "check_research",
+    title: "Wait for a Research answer",
+    description:
+      "Keep waiting for a Research answer that was still being written: pass the job_id that research or the last check_research gave you. Each call waits up to about a minute; call again while it says it's still writing. Doesn't use another daily answer.",
+    inputSchema: {
+      type: "object",
+      properties: { job_id: { type: "string", description: "The job_id from research." } },
+      required: ["job_id"],
+    },
+    annotations: { title: "Wait for a Research answer", ...READ_ONLY },
+  },
+  {
+    name: "my_history",
+    title: "List my saved questions",
+    description:
+      "List the questions this La Tafti account has asked (on the website or through you), newest first: each one's id, date, and whether it was a Research answer or a Chat conversation.",
+    inputSchema: { type: "object", properties: {} },
+    annotations: { title: "List my saved questions", ...READ_ONLY },
+  },
+  {
+    name: "open_saved",
+    title: "Open a saved answer",
+    description: "Read one saved Research answer or Chat conversation from the account's history in full, with its sources. Pass the id from my_history.",
+    inputSchema: {
+      type: "object",
+      properties: { id: { type: "string", description: "The id from my_history." } },
+      required: ["id"],
+    },
+    annotations: { title: "Open a saved answer", ...READ_ONLY },
+  },
+  {
     name: "list_channels",
     title: "List the channels",
     description:
@@ -108,11 +171,15 @@ const TOOLS = [
 type Rpc = { jsonrpc?: unknown; id?: unknown; method?: unknown; params?: Record<string, unknown> };
 const REVOKED = Symbol("revoked");
 
-const toolText = (text: string, isError = false) => ({ content: [{ type: "text", text }], isError });
+const SEARCH_TOOLS = new Set(["search_lectures", "find_videos", "read_transcript", "list_channels"]);
 
-async function callTool(params: Record<string, unknown>, g: Grant) {
+const strList = (v: unknown) =>
+  Array.isArray(v) ? v.filter((x): x is string => typeof x === "string" && x.trim() !== "").slice(0, 60) : undefined;
+
+async function callTool(params: Record<string, unknown>, g: Grant): Promise<ToolResult | typeof REVOKED> {
   const name = String(params?.name || "");
-  const args = params?.arguments && typeof params.arguments === "object" ? params.arguments : {};
+  const args = (params?.arguments && typeof params.arguments === "object" ? params.arguments : {}) as Record<string, unknown>;
+  if (!SEARCH_TOOLS.has(name)) return otherTool(name, args, g);
   let used;
   try {
     used = await consumeMcp(g.sub, g.gen);
@@ -153,6 +220,47 @@ async function callTool(params: Record<string, unknown>, g: Grant) {
     return toolText(String(d.text || ""), !!d.is_error);
   } catch {
     return toolText("Couldn't reach the archive - try again in a minute.", true);
+  }
+}
+
+// Research, its wait, and the history: these check the connection is still allowed themselves (the
+// search tools do it as part of counting the connector allowance).
+async function otherTool(name: string, args: Record<string, unknown>, g: Grant): Promise<ToolResult | typeof REVOKED> {
+  try {
+    if ((await getMcpGen(g.sub)) !== g.gen) return REVOKED;
+  } catch {
+    return toolText("Couldn't check your La Tafti account just now - try again in a moment.", true);
+  }
+  try {
+    if (name === "check_research") {
+      const jobId = typeof args.job_id === "string" ? args.job_id.trim() : "";
+      if (!/^[0-9a-f]{32}$/.test(jobId)) return toolText("Give the job_id that research returned.", true);
+      return await research(g.sub, { job_id: jobId });
+    }
+    if (name === "my_history") return await historyList(g.sub);
+    if (name === "open_saved") return await historyOpen(g.sub, typeof args.id === "string" ? args.id.trim() : "");
+    // research: one of the account's daily answers, as on the website
+    const question = typeof args.question === "string" ? args.question.trim().slice(0, 2000) : "";
+    if (!question) return toolText("Give the question to research.", true);
+    const allow = await allowedChannels(isAdminEmail(g.em), strList(args.channels), g.sub);
+    if (allow.blocked) return toolText("None of those channels can be searched from this account.", true);
+    const used = await consumeDaily(g.sub, false);
+    if (used.remaining < 0) {
+      return toolText(
+        `This La Tafti account has used today's ${used.cap} Research answers; they reset at midnight (UTC). search_lectures still works, and doesn't use them.`,
+        true
+      );
+    }
+    const names = await channelNameOverrides();
+    const depth = ["quick", "standard", "deep"].includes(String(args.depth)) ? String(args.depth) : undefined;
+    const style = ["topical", "verbatim"].includes(String(args.style)) ? String(args.style) : undefined;
+    return await research(
+      g.sub,
+      { question, channels: allow.channels, mode: depth, style, channel_names: Object.keys(names).length ? names : undefined },
+      used.remaining
+    );
+  } catch {
+    return toolText("La Tafti couldn't do that just now - try again in a moment.", true);
   }
 }
 

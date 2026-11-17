@@ -340,6 +340,20 @@ def _run_job(job, ctx, q, req):
             job["cond"].notify_all()
 
 
+def _start_job(ctx, q, req, uid):
+    """Register a new answer job (dropping ones past JOB_TTL) and start writing it in the background."""
+    now = time.time()
+    job = {"id": uuid.uuid4().hex, "uid": uid or "", "t": now, "events": [], "done": False,
+           "cond": threading.Condition(), "q": q, "mode": req.mode or brain.DEFAULT_MODE,
+           "style": req.style or "topical"}
+    with JOBS_LOCK:
+        for k in [k for k, j in JOBS.items() if now - j["t"] > JOB_TTL]:
+            del JOBS[k]
+        JOBS[job["id"]] = job
+    threading.Thread(target=_run_job, args=(job, ctx, q, req), daemon=True).start()
+    return job
+
+
 def _follow(job, after):
     """SSE for a job from event `after` on, live until it finishes. A comment line every 15 s of
     quiet keeps proxies from closing the connection while Claude is still reading."""
@@ -374,14 +388,7 @@ def ask_stream(req: AskRequest, request: Request, x_brain_key: str = Header(None
     blocked = _rate_limited(ip, "chat" if req.chat else "ask")
     if blocked:
         raise HTTPException(status_code=429, detail=blocked)
-    now = time.time()
-    job = {"id": uuid.uuid4().hex, "uid": x_user_id or "", "t": now, "events": [], "done": False,
-           "cond": threading.Condition()}
-    with JOBS_LOCK:
-        for k in [k for k, j in JOBS.items() if now - j["t"] > JOB_TTL]:
-            del JOBS[k]
-        JOBS[job["id"]] = job
-    threading.Thread(target=_run_job, args=(job, ctx, q, req), daemon=True).start()
+    job = _start_job(ctx, q, req, x_user_id)
 
     def gen():
         yield _sse("job", {"id": job["id"]})
@@ -465,6 +472,91 @@ def mcp_call(req: McpCall, x_brain_key: str = Header(None), x_user_id: str = Hea
         print(f"mcp {req.tool} failed: {type(e).__name__}: {str(e)[:200]}", flush=True)
         return {"text": "The archive couldn't run that just now - try again.", "is_error": True}
     return {"text": text, "is_error": is_error}
+
+
+class McpResearch(BaseModel):
+    question: str | None = None   # start a new answer...
+    job_id: str | None = None     # ...or keep waiting for one already started
+    channels: list[str] | None = None
+    mode: str | None = None
+    style: str | None = None
+    channel_names: dict[str, dict[str, str]] | None = None
+    wait: float | None = None     # seconds to wait for the answer before replying "still writing"
+
+
+MCP_RESEARCH_WAIT = 50  # one connector call waits this long at most; Claude calls again to keep waiting
+_SSE_RE = re.compile(r"event: (\w+)\ndata: (.*)\n\n$", re.S)
+
+
+def _job_result(job):
+    """What an answer job has produced so far, read back from its events: (stage, answer text,
+    sources, final event name, final payload) - the final event is done / empty / error, or None."""
+    stage, text, sources, end, final = "", [], [], None, {}
+    for ev in list(job["events"]):
+        m = _SSE_RE.match(ev)
+        if not m:
+            continue
+        kind, data = m.group(1), json.loads(m.group(2))
+        if kind == "status":
+            stage = data.get("stage") or stage
+        elif kind == "delta":
+            text.append(data.get("text") or "")
+        elif kind == "source":
+            sources.append(data)
+        elif kind in ("done", "empty", "error"):
+            end, final = kind, data
+    return stage, "".join(text), sources, end, final
+
+
+@app.post("/mcp/research")
+def mcp_research(req: McpResearch, x_brain_key: str = Header(None), x_user_id: str = Header(None)):
+    """A Research answer for an account's Claude: the same job, cache and spend as a question asked on
+    the website (the website has already counted it against the account's daily answers). Waits up to
+    `wait` seconds; an answer still being written comes back as "running" with its job id, and the
+    connector calls again with that id to keep waiting. Returns the answer as data; the website words
+    it for Claude and saves it to the account's history."""
+    _check_key(x_brain_key)
+    ctx = _ctx()
+    uid = x_user_id or ""
+    if req.job_id:
+        with JOBS_LOCK:
+            job = JOBS.get(req.job_id)
+        if job is None or job["uid"] != uid:
+            return {"state": "gone"}
+    else:
+        q = (req.question or "").strip()[:2000]
+        if not q:
+            return {"state": "error", "error": "Give a question to research."}
+        if req.channels is not None and not req.channels:
+            return {"state": "error", "error": "There are no channels to search."}
+        blocked = _rate_limited(f"user:{uid}", "ask")  # every connector call comes from Anthropic's IPs
+        if blocked:
+            return {"state": "error", "error": blocked}
+        mode = req.mode if req.mode in brain.MODES else None
+        style = req.style if req.style in ("topical", "verbatim") else None
+        ask = AskRequest(question=q, channels=req.channels, mode=mode, style=style, channel_names=req.channel_names)
+        job = _start_job(ctx, q, ask, uid)
+    deadline = time.time() + max(1.0, min(110.0, req.wait or MCP_RESEARCH_WAIT))
+    with job["cond"]:
+        while not job["done"]:
+            left = deadline - time.time()
+            if left <= 0:
+                break
+            job["cond"].wait(timeout=left)
+    stage, answer, sources, end, final = _job_result(job)
+    out = {"job_id": job["id"], "q": job.get("q", ""), "mode": job.get("mode"), "style": job.get("style")}
+    if end is None:
+        return {**out, "state": "running", "stage": stage, "written": len(answer)}
+    if end == "error":
+        return {**out, "state": "error", "error": final.get("error") or "the answer failed"}
+    if end == "empty":
+        return {**out, "state": "empty"}
+    with job["cond"]:  # the website saves a finished answer to history once: say whether this is the first time
+        first = not job.get("delivered")
+        job["delivered"] = True
+    return {**out, "state": "done", "answer": answer, "sources": sources, "first": first,
+            "coverage": final.get("coverage"), "cost_usd": final.get("cost_usd"),
+            "cached": bool(final.get("cached")), "relevant": final.get("relevant") or []}
 
 
 class MomentsRequest(BaseModel):

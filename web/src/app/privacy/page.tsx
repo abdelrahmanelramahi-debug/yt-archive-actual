@@ -48,10 +48,12 @@ export default function PrivacyPage() {
 
       <h2>Using La Tafti in Claude</h2>
       <p>
-        If you connect La Tafti to Claude as a connector, Claude sends us the searches it makes for you (the
-        search words, never your Claude conversation), and we send back passages from the archive. We keep a
-        daily count of those searches on your account, as with answers. Claude only gets access after you sign
-        in and press Allow, and &ldquo;Disconnect Claude&rdquo; in the sidebar ends that access everywhere.
+        If you connect La Tafti to Claude as a connector, Claude sends us the searches and Research questions it
+        makes for you (never your Claude conversation), and we send back passages and answers from the archive.
+        Research answers it asks for count toward your daily answers and are saved to your history, and Claude
+        can read your saved questions and answers. We keep a daily count of its searches on your account. Claude
+        only gets access after you sign in and press Allow, and &ldquo;Disconnect Claude&rdquo; in the sidebar
+        ends that access everywhere.
         What Claude does with the results is covered by Anthropic&rsquo;s own terms and privacy policy.
       </p>
 

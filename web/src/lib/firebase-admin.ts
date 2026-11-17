@@ -179,6 +179,88 @@ export async function markCodeUsed(id: string): Promise<boolean> {
   return true;
 }
 
+// ---- History (users/{uid}/chats), for the connector: Claude's Research answers are saved there like
+// the website's, and Claude can list and reopen the account's past questions. Firestore REST speaks
+// typed values, so plain objects are converted both ways.
+
+type FsValue = Record<string, unknown>;
+
+function toFs(v: unknown): FsValue {
+  if (v === null || v === undefined) return { nullValue: null };
+  if (typeof v === "boolean") return { booleanValue: v };
+  if (typeof v === "number") return Number.isInteger(v) ? { integerValue: String(v) } : { doubleValue: v };
+  if (typeof v === "string") return { stringValue: v };
+  if (v instanceof Date) return { timestampValue: v.toISOString() };
+  if (Array.isArray(v)) return { arrayValue: { values: v.map(toFs) } };
+  if (typeof v === "object") {
+    const fields: Record<string, FsValue> = {};
+    for (const [k, x] of Object.entries(v)) if (x !== undefined) fields[k] = toFs(x);
+    return { mapValue: { fields } };
+  }
+  return { nullValue: null };
+}
+
+function fromFs(v: FsValue): unknown {
+  if ("stringValue" in v) return v.stringValue;
+  if ("integerValue" in v) return Number(v.integerValue);
+  if ("doubleValue" in v) return Number(v.doubleValue);
+  if ("booleanValue" in v) return v.booleanValue;
+  if ("timestampValue" in v) return v.timestampValue;
+  if ("arrayValue" in v) return (((v.arrayValue as { values?: FsValue[] }) || {}).values || []).map(fromFs);
+  if ("mapValue" in v) return fromFields(((v.mapValue as { fields?: Record<string, FsValue> }) || {}).fields);
+  return null;
+}
+
+const fromFields = (f?: Record<string, FsValue>) =>
+  Object.fromEntries(Object.entries(f || {}).map(([k, x]) => [k, fromFs(x)])) as Record<string, unknown>;
+
+// Save one answered question to the account's history (as the website does after an answer).
+export async function saveHistory(uid: string, item: Record<string, unknown>): Promise<void> {
+  const token = await accessToken();
+  const fields = (toFs({ ...item, createdAt: new Date() }).mapValue as { fields: Record<string, FsValue> }).fields;
+  const r = await fetch(`${DOC}/${uid}/chats`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ fields }),
+  });
+  if (!r.ok) throw new Error(`history save failed: ${r.status}`);
+}
+
+export type HistoryItem = { id: string; q: string; kind: string; createdAt: string; style: string; via: string };
+
+// The account's most recent saved questions, newest first (just their headings).
+export async function listHistory(uid: string, n = 25): Promise<HistoryItem[]> {
+  const token = await accessToken();
+  const mask = ["q", "kind", "createdAt", "style", "via"].map((f) => `mask.fieldPaths=${f}`).join("&");
+  const r = await fetch(`${DOC}/${uid}/chats?pageSize=${n}&orderBy=${encodeURIComponent("createdAt desc")}&${mask}`, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!r.ok) throw new Error(`history list failed: ${r.status}`);
+  const j = (await r.json()) as { documents?: { name: string; fields?: Record<string, FsValue> }[] };
+  return (j.documents || []).map((d) => {
+    const f = fromFields(d.fields);
+    return {
+      id: d.name.split("/").pop() || "",
+      q: String(f.q || ""),
+      kind: f.kind === "chat" ? "chat" : "research",
+      createdAt: String(f.createdAt || ""),
+      style: String(f.style || ""),
+      via: String(f.via || ""),
+    };
+  });
+}
+
+// One saved question in full, or null if there's no such item in this account's history.
+export async function getHistory(uid: string, id: string): Promise<Record<string, unknown> | null> {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(id)) return null;
+  const token = await accessToken();
+  const r = await fetch(`${DOC}/${uid}/chats/${id}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (r.status === 404) return null;
+  if (!r.ok) throw new Error(`history read failed: ${r.status}`);
+  const j = (await r.json()) as { fields?: Record<string, FsValue> };
+  return fromFields(j.fields);
+}
+
 // Whether the account still exists and isn't disabled (checked when Claude renews its access).
 export async function accountActive(uid: string): Promise<boolean> {
   const token = await accessToken(SCOPE_ADMIN);

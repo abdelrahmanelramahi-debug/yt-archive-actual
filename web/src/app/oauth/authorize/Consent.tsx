@@ -96,7 +96,7 @@ export default function Consent() {
       <div className="mt-6 rounded-xl border border-line bg-raised p-4">
         <p dir="auto" className="text-[13px] font-medium text-ink">{t("connect.can")}</p>
         <ul className="mt-2.5 space-y-2 text-[13px] text-muted">
-          {[t("connect.can1"), t("connect.can2"), t("connect.can3", { cap: MCP_CAP })].map((x) => (
+          {[t("connect.can1"), t("connect.can2"), t("connect.can4"), t("connect.can5"), t("connect.can3", { cap: MCP_CAP })].map((x) => (
             <li key={x} dir="auto" className="flex gap-2">
               <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden className="mt-0.5 shrink-0 text-accent">
                 <path d="m5 12.5 4.5 4.5L19 7.5" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
