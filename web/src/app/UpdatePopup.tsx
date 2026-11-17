@@ -63,9 +63,21 @@ const Plug = (
   </svg>
 );
 
+const Star = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden className={ICON}>
+    <path d="M12 3.1 14.6 5.7h3.7v3.7l2.6 2.6-2.6 2.6v3.7h-3.7L12 20.9l-2.6-2.6H5.7v-3.7L3.1 12l2.6-2.6V5.7h3.7Z" stroke="currentColor" strokeWidth="1.6" strokeLinejoin="round" />
+  </svg>
+);
+
 // Updates, newest first. Add a new entry at the TOP (with a fresh id) to re-show the pop-up; older
 // entries stay as flip-back pages. The id of the top entry is what "seen" is tracked against.
 const UPDATES: { id: string; items: { key: string; icon: ReactNode }[] }[] = [
+  {
+    id: "2026-11-17e",
+    items: [
+      { key: "icon2", icon: Star },
+    ],
+  },
   {
     id: "2026-11-17d",
     items: [
