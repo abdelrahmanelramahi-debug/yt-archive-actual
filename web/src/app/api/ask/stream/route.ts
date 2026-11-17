@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyIdToken, consumeDaily, consumeChat } from "../../../../lib/firebase-admin";
+import { verifyIdToken, consumeDaily, consumeChat, refundUse } from "../../../../lib/firebase-admin";
+import { withoutCost } from "../../../../lib/no-cost";
 import { allowedChannels, channelNameOverrides } from "../../../../lib/channels";
 
 // Streams the brain's Server-Sent Events straight through to the browser. Runs server-side only,
@@ -9,6 +10,14 @@ import { allowedChannels, channelNameOverrides } from "../../../../lib/channels"
 
 const BRAIN_URL = process.env.BRAIN_URL || "http://127.0.0.1:8000";
 const BRAIN_KEY = process.env.BRAIN_KEY || "";
+
+// The brain couldn't take the question (it restarts for a few minutes after each update): give the
+// use back and tell the page, which shows its "updating" notice.
+const updating = () =>
+  NextResponse.json(
+    { error: "La Tafti is being updated. Your question wasn't counted - please ask again in a few minutes.", updating: true },
+    { status: 503 }
+  );
 
 export async function POST(req: NextRequest) {
   // only signed-in users, within their daily allowance (same rule as /api/ask)
@@ -114,11 +123,13 @@ export async function POST(req: NextRequest) {
       }),
     });
     if (!r.ok || !r.body) {
+      await refundUse(uid, chat ? "chat" : "answer");
+      if (r.status >= 500) return updating();
       const data = await r.json().catch(() => ({ error: "The brain returned an unexpected response." }));
       return NextResponse.json(data, { status: r.status || 502 });
     }
-    // pass the SSE body through unbuffered
-    return new Response(r.body, {
+    // pass the SSE body through unbuffered (what it cost is for admins only)
+    return new Response(auth.admin ? r.body : withoutCost(r.body), {
       status: 200,
       headers: {
         "Content-Type": "text/event-stream; charset=utf-8",
@@ -126,11 +137,8 @@ export async function POST(req: NextRequest) {
         Connection: "keep-alive",
       },
     });
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json(
-      { error: "Could not reach the search service. (" + msg + ")" },
-      { status: 502 }
-    );
+  } catch {
+    await refundUse(uid, chat ? "chat" : "answer");
+    return updating();
   }
 }

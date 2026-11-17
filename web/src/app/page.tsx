@@ -8,6 +8,7 @@ import { db } from "../lib/firebase";
 import SignIn from "./SignIn";
 import UpdatePopup from "./UpdatePopup";
 import ClaudePanel from "./ClaudePanel";
+import { useArchiveStatus, StatusBanner } from "./ArchiveStatus";
 
 const DAILY_CAP = 20; // free answers per user per day (keep in sync with the server's cap)
 const GUEST_CAP = 2; // free questions for a guest (anonymous) before they're asked to sign up
@@ -191,7 +192,7 @@ function lightSource(s: Source, withContext = true) {
 }
 
 type Channel = { slug: string; name: string; kind: string; en?: string; ar?: string };
-type Mode = { id: string; label: string; usd: number };
+type Mode = { id: string; label: string; usd?: number }; // usd reaches admins only
 
 // A channel's display name in the current interface language: the admin override for that language,
 // then the other language's override, then the brain's own name.
@@ -368,8 +369,8 @@ function ThemeSelector() {
   );
 }
 
-// Depth selector: Quick / Standard / Deep, each with its own typical cost.
-function ModePicker({ modes, mode, onChange }: { modes: Mode[]; mode: string; onChange: (id: string) => void }) {
+// Depth selector: Quick / Standard / Deep (admins also see each one's typical cost).
+function ModePicker({ modes, mode, onChange, showCost = false }: { modes: Mode[]; mode: string; onChange: (id: string) => void; showCost?: boolean }) {
   if (!modes.length) return null;
   return (
     <div className="inline-flex rounded-xl border border-line bg-raised/70 p-0.5">
@@ -378,7 +379,7 @@ function ModePicker({ modes, mode, onChange }: { modes: Mode[]; mode: string; on
           key={m.id}
           type="button"
           onClick={() => onChange(m.id)}
-          title={`${m.label} — about ${aed(m.usd)} per answer`}
+          title={showCost ? `${m.label} — about ${aed(m.usd ?? 0)} per answer` : m.label}
           className={`rounded-[9px] px-3 py-1.5 text-[13px] font-medium transition ${
             mode === m.id ? "bg-accent text-paper shadow-sm" : "text-muted hover:text-ink"
           }`}
@@ -503,7 +504,7 @@ function ChannelPicker({
   );
 }
 
-// Compact depth selector holding the depths, their cost, and the explainer. Opens up above the ask
+// Compact depth selector holding the depths (and, for admins, their cost) and the explainer. Opens up above the ask
 // bar on the phone landing; opens down once the controls sit at the top (after a question is asked).
 function ModeDropup({
   modes,
@@ -512,6 +513,7 @@ function ModeDropup({
   dropUp = true,
   moments,
   keeps: keepsFor,
+  showCost = false,
 }: {
   modes: Mode[];
   mode: string;
@@ -519,6 +521,7 @@ function ModeDropup({
   dropUp?: boolean;
   moments?: string;
   keeps?: Record<string, string>; // Chat keeps far fewer moments per message than a Research answer
+  showCost?: boolean; // prices are for admins only
 }) {
   const [open, setOpen] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
@@ -543,7 +546,7 @@ function ModeDropup({
         className="inline-flex items-center gap-2 rounded-xl border border-line bg-raised/70 px-3 py-1.5 text-[13px] font-medium text-ink transition hover:border-line2"
       >
         {current?.label ?? "Depth"}
-        <span className="text-gold2">≈ {aed(current?.usd ?? TYPICAL_COST)}</span>
+        {showCost && <span className="text-gold2">≈ {aed(current?.usd ?? TYPICAL_COST)}</span>}
         <svg width="12" height="12" viewBox="0 0 24 24" fill="none" aria-hidden className="text-faint">
           <path d={dropUp ? "m6 15 6-6 6 6" : "m6 9 6 6 6-6"} stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
@@ -570,7 +573,8 @@ function ModeDropup({
             >
               <span className="font-medium">{m.label}</span>
               <span className="text-faint">
-                keeps {keeps[m.id] ?? "?"} · {aed(m.usd)}
+                keeps {keeps[m.id] ?? "?"}
+                {showCost && <> · {aed(m.usd ?? 0)}</>}
               </span>
             </button>
           ))}
@@ -595,7 +599,7 @@ function Stat({ n, label }: { n: string; label: string }) {
 }
 
 // Collapsible explainer for the depth modes, under the picker.
-function ModeExplainer({ modes, moments }: { modes: Mode[]; moments?: string }) {
+function ModeExplainer({ modes, moments, showCost = false }: { modes: Mode[]; moments?: string; showCost?: boolean }) {
   const [open, setOpen] = useState(false);
   if (!modes.length) return null;
   const keeps: Record<string, string> = { quick: "~120", standard: "~500", deep: "~1,000", custom: "you set" };
@@ -629,7 +633,8 @@ function ModeExplainer({ modes, moments }: { modes: Mode[]; moments?: string }) 
               <div key={m.id} className="flex items-baseline gap-2">
                 <span className="w-[4.5rem] shrink-0 font-medium text-ink">{m.label}</span>
                 <span className="text-muted">
-                  keeps <span className="text-gold2">{keeps[m.id] ?? "?"}</span> · ≈ {aed(m.usd)} · {when[m.id] ?? ""}
+                  keeps <span className="text-gold2">{keeps[m.id] ?? "?"}</span> · {showCost && <>≈ {aed(m.usd ?? 0)} · </>}
+                  {when[m.id] ?? ""}
                 </span>
               </div>
             ))}
@@ -759,6 +764,7 @@ export default function Home() {
   const [mcpUsed, setMcpUsed] = useState(0);
   const [mcpCap, setMcpCap] = useState(MCP_CAP);
   const [guestOpen, setGuestOpen] = useState(false);
+  const archive = useArchiveStatus(); // "updating" while the archive restarts after an update
   // Research (one long cited briefing) or Chat (a conversation); remembered on this device
   const [view, setViewState] = useState<"research" | "chat">("research");
   const [turns, setTurns] = useState<Turn[]>([]); // the Chat conversation on screen
@@ -1020,13 +1026,14 @@ export default function Home() {
         body: JSON.stringify(payload),
       });
       if (!r.ok || !r.body) {
-        const d = (await r.json().catch(() => ({}))) as { error?: string; guest?: boolean };
+        const d = (await r.json().catch(() => ({}))) as { error?: string; guest?: boolean; updating?: boolean };
         if (d.guest) {
           if (chatSession.current === session) setTurns((ts) => ts.slice(0, idx));
           setGuestOpen(true);
           return;
         }
-        upd({ status: "error", error: d.error || t("err.generic") });
+        if (d.updating) archive.markUpdating();
+        upd({ status: "error", error: d.updating ? t("status.askLater") : d.error || t("err.generic") });
         return;
       }
       body = r.body;
@@ -1115,7 +1122,7 @@ export default function Home() {
     if (c.kind === "chat") {
       chatSession.current++;
       chatDocId.current = c.id;
-      setTurns((c.turns || []).map((tn) => ({ ...tn, sources: tn.sources || [], status: "done" as const })));
+      setTurns((c.turns || []).map((tn) => ({ ...tn, sources: tn.sources || [], status: "done" as const, cost_usd: isAdmin ? tn.cost_usd : null })));
       setView("chat");
       setCurrentChatId(c.id);
       if (window.innerWidth < 640) setSidebarOpen(false);
@@ -1125,7 +1132,7 @@ export default function Home() {
     setView("research");
     setAsked(c.q);
     setAnswerStyle(c.style === "verbatim" ? "verbatim" : "topical");
-    setResult({ q: c.q, empty: false, answer: c.answer, sources: c.sources || [], coverage: c.coverage, cost_usd: c.cost_usd ?? undefined, relevant: c.relevant });
+    setResult({ q: c.q, empty: false, answer: c.answer, sources: c.sources || [], coverage: c.coverage, cost_usd: isAdmin ? c.cost_usd ?? undefined : undefined, relevant: c.relevant });
     setStatus("done");
     setStreamText("");
     setError("");
@@ -1219,14 +1226,15 @@ export default function Home() {
         headers,
         body: JSON.stringify(payload),
       });
-      const data: Answer & { guest?: boolean } = await r.json();
+      const data: Answer & { guest?: boolean; updating?: boolean } = await r.json();
       if (!r.ok || data.error) {
         if (data.guest) {
           setGuestOpen(true);
           setStatus("idle");
           return;
         }
-        setError(data.error || t("err.generic"));
+        if (data.updating) archive.markUpdating();
+        setError(data.updating ? t("status.askLater") : data.error || t("err.generic"));
         setStatus("error");
         return;
       }
@@ -1259,7 +1267,9 @@ export default function Home() {
           setLive(false);
           return;
         }
-        setError((data as { error?: string }).error || t("err.generic"));
+        const d = data as { error?: string; updating?: boolean };
+        if (d.updating) archive.markUpdating();
+        setError(d.updating ? t("status.askLater") : d.error || t("err.generic"));
         setStatus("error");
         setLive(false);
         return;
@@ -1497,7 +1507,7 @@ export default function Home() {
   const customUsd = estimateCost(customMoments, customTokens);
   // Chat keeps the same depths (minus the admin custom one) at its own, much lower, prices
   const displayModes: Mode[] = chatView
-    ? modes.map((m) => ({ ...m, usd: CHAT_USD[m.id] ?? m.usd }))
+    ? modes.map((m) => ({ ...m, usd: isAdmin ? CHAT_USD[m.id] ?? m.usd : undefined }))
     : isAdmin
       ? [...modes, { id: "custom", label: t("mode.custom"), usd: customUsd }]
       : modes;
@@ -1535,6 +1545,7 @@ export default function Home() {
       {claudeOpen && <ClaudePanel used={mcpUsed} cap={mcpCap} onClose={() => setClaudeOpen(false)} />}
       {guestOpen && <GuestPrompt onClose={() => setGuestOpen(false)} />}
       {!user.isAnonymous && <UpdatePopup />}
+      <StatusBanner state={archive.state} />
       <div className={`transition-[margin] duration-200 ${sidebarOpen ? "ltr:sm:ml-[264px] rtl:sm:mr-[264px]" : ""}`}>
         <main className={`mx-auto w-full max-w-3xl px-5 ${landing ? "pb-10" : chatActive ? "pb-0" : "pb-28"}`}>
           {/* top bar: open the sidebar (always on phones; on desktop only when it's collapsed) */}
@@ -1649,6 +1660,7 @@ export default function Home() {
                     dropUp={landing || chatActive}
                     moments={momentsLabel}
                     keeps={chatView ? CHAT_KEEPS : undefined}
+                    showCost={isAdmin}
                   />
                 </div>
               </div>
@@ -1666,11 +1678,13 @@ export default function Home() {
                   <ChannelPicker channels={channels} selected={selected} onChange={setSelected} />
                 </div>
                 <div className="flex flex-col items-end gap-2">
-                  {!chatView && <ModeExplainer modes={displayModes} moments={momentsLabel} />}
-                  <p className="text-[13px] text-gold2">{t(chatView ? "controls.perMessage" : "controls.perAnswer", { price: aed(modeUsd) })}</p>
+                  {!chatView && <ModeExplainer modes={displayModes} moments={momentsLabel} showCost={isAdmin} />}
+                  {isAdmin && (
+                    <p className="text-[13px] text-gold2">{t(chatView ? "controls.perMessage" : "controls.perAnswer", { price: aed(modeUsd) })}</p>
+                  )}
                   <div className="flex items-center gap-2">
                     {!chatView && <StyleToggle value={style} onChange={setStyle} />}
-                    <ModePicker modes={displayModes} mode={mode} onChange={setMode} />
+                    <ModePicker modes={displayModes} mode={mode} onChange={setMode} showCost={isAdmin} />
                   </div>
                 </div>
               </div>
@@ -1711,7 +1725,7 @@ export default function Home() {
               />
               <button
                 type="submit"
-                disabled={!q.trim() || (chatView ? chatBusy : status === "loading") || noneSelected}
+                disabled={!q.trim() || (chatView ? chatBusy : status === "loading") || noneSelected || archive.state === "updating"}
                 aria-label={t("ask.submit")}
                 className="grid h-9 w-9 shrink-0 place-items-center rounded-xl bg-accent text-paper transition enabled:hover:bg-accent2 disabled:opacity-30"
               >

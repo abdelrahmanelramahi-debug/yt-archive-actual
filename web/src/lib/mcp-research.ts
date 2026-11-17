@@ -1,7 +1,7 @@
 // The connector's Research and history tools (see app/mcp/route.ts). Research asks the brain for the
 // same answer the website writes: it counts against the account's daily answers, is saved to the
 // account's history once finished, and comes back to Claude as text with its numbered sources.
-import { saveHistory, listHistory, getHistory } from "./firebase-admin";
+import { saveHistory, listHistory, getHistory, refundUse } from "./firebase-admin";
 
 const BRAIN_URL = process.env.BRAIN_URL || "http://127.0.0.1:8000";
 const BRAIN_KEY = process.env.BRAIN_KEY || "";
@@ -40,6 +40,8 @@ type Reply = {
   relevant?: { c: string; s: string }[];
   first?: boolean;
 };
+
+export const UPDATING = "La Tafti is being updated right now, so the archive can't answer for a few minutes - try again shortly.";
 
 export type ToolResult = { content: { type: "text"; text: string }[]; isError: boolean };
 export const toolText = (text: string, isError = false): ToolResult => ({ content: [{ type: "text", text }], isError });
@@ -114,7 +116,7 @@ function wordReply(d: Reply, left?: number): ToolResult {
       const sources = d.sources || [];
       const head =
         `La Tafti Research answer (${d.mode || "standard"} depth, ${d.style || "topical"} style)` +
-        (d.cached ? ", served free from an identical earlier question" : "") +
+        (d.cached ? ", served instantly from an identical earlier question" : "") +
         `. It read ${cov.moments ?? "?"} moments across ${cov.videos ?? "?"} videos and cites ${sources.length} of them.` +
         (left !== undefined ? ` This account has ${left} Research answer${left === 1 ? "" : "s"} left today.` : "") +
         "\nGive the user this answer faithfully: you may format or shorten it, but add no rulings of your own, and keep each [n] citation linked to its source below. It is also saved in their La Tafti history.";
@@ -124,7 +126,8 @@ function wordReply(d: Reply, left?: number): ToolResult {
 }
 
 // Ask the brain to start an answer (question) or keep waiting for one (jobId), then word the reply.
-// A finished answer is saved to the account's history the first time it is handed over.
+// A finished answer is saved to the account's history the first time it is handed over. `left` is set
+// when this call counted a daily answer: if no answer could start, that use is given back.
 export async function research(
   uid: string,
   body: { question?: string; job_id?: string; channels?: string[]; mode?: string; style?: string; channel_names?: unknown },
@@ -138,11 +141,13 @@ export async function research(
       body: JSON.stringify(body),
       signal: AbortSignal.timeout(110_000),
     });
-    if (!r.ok) return toolText("The archive is busy or restarting - try again in a minute.", true);
+    if (!r.ok) throw new Error(`brain ${r.status}`);
     d = (await r.json()) as Reply;
   } catch {
-    return toolText("Couldn't reach the archive - try again in a minute.", true);
+    if (left !== undefined) await refundUse(uid, "answer");
+    return toolText(UPDATING + (left !== undefined ? " That didn't use a daily answer." : ""), true);
   }
+  if (d.state === "error" && !d.job_id && left !== undefined) await refundUse(uid, "answer"); // nothing started
   if (d.state === "done" && d.first && d.answer) {
     try {
       await saveHistory(uid, {

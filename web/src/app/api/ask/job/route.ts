@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyIdToken } from "../../../../lib/firebase-admin";
+import { withoutCost } from "../../../../lib/no-cost";
 
 // Reconnects the page to an answer that is still being written (or just finished) on the brain —
 // after a phone switched apps mid-answer, or the page was reloaded. Replays its events from `after`
@@ -22,7 +23,7 @@ export async function GET(req: NextRequest) {
       const data = await r.json().catch(() => ({}));
       return NextResponse.json(data, { status: r.status || 502 });
     }
-    return new Response(r.body, {
+    return new Response(auth.admin ? r.body : withoutCost(r.body), {
       status: 200,
       headers: {
         "Content-Type": "text/event-stream; charset=utf-8",

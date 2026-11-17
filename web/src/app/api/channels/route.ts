@@ -1,6 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { verifyIdToken } from "../../../lib/firebase-admin";
 import { effectiveHidden, channelNameOverrides } from "../../../lib/channels";
+import { stripCost } from "../../../lib/no-cost";
 
 // Server-side only: fetch the channel list + depth modes from the brain for the pickers.
 // Non-admins don't see channels an admin has hidden (actual access is enforced in /api/ask too).
@@ -43,7 +44,7 @@ export async function GET(req: NextRequest) {
         });
       }
     }
-    return NextResponse.json(data, { status: r.status });
+    return NextResponse.json(auth?.admin ? data : stripCost(data), { status: r.status }); // prices: admins only
   } catch {
     return NextResponse.json({ channels: [], modes: [] }, { status: 502 });
   }

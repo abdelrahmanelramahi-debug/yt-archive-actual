@@ -1,10 +1,19 @@
 import { NextRequest, NextResponse } from "next/server";
-import { verifyIdToken, consumeDaily } from "../../../lib/firebase-admin";
+import { verifyIdToken, consumeDaily, refundUse } from "../../../lib/firebase-admin";
+import { stripCost } from "../../../lib/no-cost";
 import { allowedChannels, channelNameOverrides } from "../../../lib/channels";
 
 // Runs server-side only (Node runtime by default): the brain URL and key never reach the browser.
 const BRAIN_URL = process.env.BRAIN_URL || "http://127.0.0.1:8000";
 const BRAIN_KEY = process.env.BRAIN_KEY || "";
+
+// The brain couldn't take the question (it restarts for a few minutes after each update): give the
+// use back and tell the page, which shows its "updating" notice.
+const updating = () =>
+  NextResponse.json(
+    { error: "La Tafti is being updated. Your question wasn't counted - please ask again in a few minutes.", updating: true },
+    { status: 503 }
+  );
 
 export async function POST(req: NextRequest) {
   // only signed-in users may ask (it spends real money), and only within their daily allowance
@@ -85,11 +94,14 @@ export async function POST(req: NextRequest) {
         answer_max: answerMax,
       }),
     });
-    const data = await r.json().catch(() => ({ error: "The brain returned an unexpected response." }));
+    if (!r.ok) await refundUse(uid, "answer");
+    if (r.status >= 500) return updating();
+    let data = await r.json().catch(() => ({ error: "The brain returned an unexpected response." }));
+    if (!auth.admin) data = stripCost(data); // what it cost is for admins only
     if (data && typeof data === "object") (data as { remaining?: number }).remaining = remaining;
     return NextResponse.json(data, { status: r.status });
-  } catch (e: unknown) {
-    const msg = e instanceof Error ? e.message : String(e);
-    return NextResponse.json({ error: "Could not reach the search service. (" + msg + ")" }, { status: 502 });
+  } catch {
+    await refundUse(uid, "answer");
+    return updating();
   }
 }

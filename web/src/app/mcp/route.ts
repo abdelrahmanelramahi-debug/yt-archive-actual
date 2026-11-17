@@ -1,8 +1,8 @@
 import { NextRequest, NextResponse } from "next/server";
 import { siteOrigin, verifyAccess, metadataUrl, MCP_SCOPE, type Grant } from "../../lib/mcp-auth";
-import { consumeMcp, consumeDaily, getMcpGen, isAdminEmail } from "../../lib/firebase-admin";
+import { consumeMcp, consumeDaily, getMcpGen, isAdminEmail, refundUse } from "../../lib/firebase-admin";
 import { allowedChannels, channelNameOverrides } from "../../lib/channels";
-import { research, historyList, historyOpen, toolText, type ToolResult } from "../../lib/mcp-research";
+import { research, historyList, historyOpen, toolText, UPDATING, type ToolResult } from "../../lib/mcp-research";
 
 // The Claude connector: an MCP server (Streamable HTTP, stateless, JSON replies) that lets an account's
 // own Claude do what the account can do on the website: search the archive, find videos, read
@@ -215,11 +215,12 @@ async function callTool(params: Record<string, unknown>, g: Grant): Promise<Tool
       }),
       signal: AbortSignal.timeout(55_000),
     });
-    if (!r.ok) return toolText("The archive is busy or restarting - try again in a minute.", true);
+    if (!r.ok) throw new Error(`brain ${r.status}`);
     const d = (await r.json()) as { text?: string; is_error?: boolean };
     return toolText(String(d.text || ""), !!d.is_error);
   } catch {
-    return toolText("Couldn't reach the archive - try again in a minute.", true);
+    await refundUse(g.sub, "mcp"); // the archive was restarting: this search isn't counted
+    return toolText(UPDATING, true);
   }
 }
 

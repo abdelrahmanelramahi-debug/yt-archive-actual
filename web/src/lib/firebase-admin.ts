@@ -84,7 +84,7 @@ export async function consumeMcp(uid: string, gen: number): Promise<{ remaining:
   return consume(uid, false, "mcp", gen);
 }
 
-type Counter = "answer" | "chat" | "mcp";
+export type Counter = "answer" | "chat" | "mcp";
 const COUNTER_FIELDS: Record<Counter, [string, string, string]> = {
   answer: ["day", "count", "cap"],
   chat: ["chatDay", "chatCount", "chatCap"],
@@ -138,6 +138,28 @@ async function consume(
   );
   if (!patch.ok) throw new Error(`firestore write failed: ${patch.status}`);
   return { remaining: cap - next, cap };
+}
+
+// Give back one counted use: the brain couldn't take the request (it was restarting for an update), so
+// nothing was answered. Only today's count, and never below zero.
+export async function refundUse(uid: string, kind: Counter): Promise<void> {
+  try {
+    const token = await accessToken();
+    const auth = { Authorization: `Bearer ${token}` };
+    const [dayF, countF] = COUNTER_FIELDS[kind];
+    const get = await fetch(`${DOC}/${uid}`, { headers: auth });
+    if (!get.ok) return;
+    const f = ((await get.json()) as { fields?: Record<string, { stringValue?: string; integerValue?: string }> }).fields || {};
+    const count = Number(f[countF]?.integerValue || 0);
+    if (f[dayF]?.stringValue !== new Date().toISOString().slice(0, 10) || count <= 0) return;
+    await fetch(`${DOC}/${uid}?updateMask.fieldPaths=${countF}`, {
+      method: "PATCH",
+      headers: { ...auth, "Content-Type": "application/json" },
+      body: JSON.stringify({ fields: { [countF]: { integerValue: String(count - 1) } } }),
+    });
+  } catch {
+    /* best-effort: at worst the one use stays counted */
+  }
 }
 
 // ---- Claude connector ------------------------------------------------------
