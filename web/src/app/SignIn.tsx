@@ -30,7 +30,9 @@ function initialMode(): "in" | "up" {
   return "in";
 }
 
-export default function SignIn() {
+// `title`/`tagline` replace the usual welcome (the Claude-connector sign-in uses its own); `noGuest`
+// hides "Continue as guest" where a guest session can't be used.
+export default function SignIn({ title, tagline, noGuest = false }: { title?: string; tagline?: string; noGuest?: boolean } = {}) {
   const { t } = useLang();
   const friendly = (e: unknown) => {
     const k = errKey(e);
@@ -91,10 +93,10 @@ export default function SignIn() {
       <div className="fade-up">
         <span className="logo-mark" role="img" aria-label="La Tafti" />
         <h1 dir="auto" className="mt-6 font-serif text-[1.7rem] font-medium leading-tight text-ink">
-          {mode === "up" ? t("signin.createTitle") : t("signin.welcome")}
+          {title ?? (mode === "up" ? t("signin.createTitle") : t("signin.welcome"))}
         </h1>
         <p dir="auto" className="mt-2 text-sm leading-relaxed text-muted">
-          {t("signin.tagline")}
+          {tagline ?? t("signin.tagline")}
         </p>
 
         <button
@@ -129,15 +131,19 @@ export default function SignIn() {
           </button>
         </form>
 
-        <button
-          type="button"
-          onClick={asGuest}
-          disabled={busy}
-          className="mt-3 w-full rounded-lg border border-line bg-raised px-4 py-2.5 text-sm font-medium text-muted transition hover:border-line2 hover:text-ink disabled:opacity-60"
-        >
-          {t("signin.guest")}
-        </button>
-        <p className="mt-1.5 text-center text-[11px] text-faint">{t("signin.guestHint")}</p>
+        {!noGuest && (
+          <>
+            <button
+              type="button"
+              onClick={asGuest}
+              disabled={busy}
+              className="mt-3 w-full rounded-lg border border-line bg-raised px-4 py-2.5 text-sm font-medium text-muted transition hover:border-line2 hover:text-ink disabled:opacity-60"
+            >
+              {t("signin.guest")}
+            </button>
+            <p className="mt-1.5 text-center text-[11px] text-faint">{t("signin.guestHint")}</p>
+          </>
+        )}
 
         <p className="mt-4 text-[13px] text-muted">
           {mode === "up" ? t("signin.haveAccount") : t("signin.newHere")}

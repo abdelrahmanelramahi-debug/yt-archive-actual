@@ -10,6 +10,9 @@ export const GUEST_CAP = Number(process.env.GUEST_CAP || 2); // free questions b
 // Chat messages are much cheaper than a Research answer, so they have their own daily allowance.
 export const CHAT_CAP = Number(process.env.CHAT_CAP || 30);
 export const GUEST_CHAT_CAP = Number(process.env.GUEST_CHAT_CAP || 5);
+// Searches an account's own Claude may run through the connector (latafti.com/mcp) per day. They make
+// no Claude call of ours, so the allowance is roomy; an admin-set `mcpCap` on the account overrides it.
+export const MCP_CAP = Number(process.env.MCP_CAP || 200);
 
 // Bootstrap admins by email (comma-separated), set in the environment. Anyone signed in with one
 // of these emails is treated as an admin — no custom-claim plumbing needed to get started.
@@ -17,6 +20,8 @@ const ADMIN_EMAILS = (process.env.ADMIN_EMAILS || "")
   .split(",")
   .map((s) => s.trim().toLowerCase())
   .filter(Boolean);
+
+export const isAdminEmail = (email: string) => email !== "" && ADMIN_EMAILS.includes(email.toLowerCase());
 
 const SCOPE_DATASTORE = "https://www.googleapis.com/auth/datastore";
 const SCOPE_ADMIN = "https://www.googleapis.com/auth/cloud-platform"; // Firestore + Identity Toolkit
@@ -63,26 +68,47 @@ const DOC = `https://firestore.googleapis.com/v1/projects/${PROJECT_ID}/database
 // together with the effective cap. Read-then-write (no transaction): the tiny concurrency window
 // can let a user get one extra, which is fine for a soft cap. The day resets at UTC midnight.
 export async function consumeDaily(uid: string, guest = false): Promise<{ remaining: number; cap: number }> {
-  return consume(uid, guest, false);
+  return consume(uid, guest, "answer");
 }
 
 // The same for one chat message: its own count (chatDay/chatCount) against CHAT_CAP, or an admin-set
 // `chatCap` on the account.
 export async function consumeChat(uid: string, guest = false): Promise<{ remaining: number; cap: number }> {
-  return consume(uid, guest, true);
+  return consume(uid, guest, "chat");
 }
 
-async function consume(uid: string, guest: boolean, chat: boolean): Promise<{ remaining: number; cap: number }> {
+// The same for one Claude-connector search (mcpDay/mcpCount against MCP_CAP or `mcpCap`). `gen` is the
+// connection generation the caller's token was issued under: if the account has since pressed
+// "Disconnect Claude" (which bumps `mcpGen`), the call is refused as revoked and nothing is counted.
+export async function consumeMcp(uid: string, gen: number): Promise<{ remaining: number; cap: number; revoked?: boolean }> {
+  return consume(uid, false, "mcp", gen);
+}
+
+type Counter = "answer" | "chat" | "mcp";
+const COUNTER_FIELDS: Record<Counter, [string, string, string]> = {
+  answer: ["day", "count", "cap"],
+  chat: ["chatDay", "chatCount", "chatCap"],
+  mcp: ["mcpDay", "mcpCount", "mcpCap"],
+};
+
+async function consume(
+  uid: string,
+  guest: boolean,
+  kind: Counter,
+  gen?: number
+): Promise<{ remaining: number; cap: number; revoked?: boolean }> {
   const token = await accessToken();
   const auth = { Authorization: `Bearer ${token}` };
   const today = new Date().toISOString().slice(0, 10);
-  const [dayF, countF, capF] = chat ? ["chatDay", "chatCount", "chatCap"] : ["day", "count", "cap"];
+  const [dayF, countF, capF] = COUNTER_FIELDS[kind];
 
   const get = await fetch(`${DOC}/${uid}`, { headers: auth });
   let count = 0;
-  let cap = chat ? (guest ? GUEST_CHAT_CAP : CHAT_CAP) : guest ? GUEST_CAP : await getDefaultCap();
+  let cap =
+    kind === "chat" ? (guest ? GUEST_CHAT_CAP : CHAT_CAP) : kind === "mcp" ? MCP_CAP : guest ? GUEST_CAP : await getDefaultCap();
   if (get.ok) {
     const f = ((await get.json()) as { fields?: Record<string, { stringValue?: string; integerValue?: string }> }).fields || {};
+    if (gen !== undefined && Number(f.mcpGen?.integerValue || 0) !== gen) return { remaining: -1, cap, revoked: true };
     if (f[dayF]?.stringValue === today) count = Number(f[countF]?.integerValue || 0);
     if (!guest) {
       const c = Number(f[capF]?.integerValue);
@@ -112,6 +138,58 @@ async function consume(uid: string, guest: boolean, chat: boolean): Promise<{ re
   );
   if (!patch.ok) throw new Error(`firestore write failed: ${patch.status}`);
   return { remaining: cap - next, cap };
+}
+
+// ---- Claude connector ------------------------------------------------------
+
+// The account's connection generation (0 until it first disconnects Claude). Every connector token
+// carries the generation it was issued under; bumping it invalidates them all at once.
+export async function getMcpGen(uid: string): Promise<number> {
+  const token = await accessToken();
+  const r = await fetch(`${DOC}/${uid}`, { headers: { Authorization: `Bearer ${token}` } });
+  if (r.status === 404) return 0;
+  if (!r.ok) throw new Error(`user read failed: ${r.status}`);
+  const j = (await r.json()) as { fields?: { mcpGen?: { integerValue?: string } } };
+  return Number(j.fields?.mcpGen?.integerValue || 0);
+}
+
+// "Disconnect Claude": every connector token this account holds stops working.
+export async function bumpMcpGen(uid: string): Promise<void> {
+  const next = (await getMcpGen(uid)) + 1;
+  const token = await accessToken();
+  const r = await fetch(`${DOC}/${uid}?updateMask.fieldPaths=mcpGen`, {
+    method: "PATCH",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ fields: { mcpGen: { integerValue: String(next) } } }),
+  });
+  if (!r.ok) throw new Error(`disconnect failed: ${r.status}`);
+}
+
+// Spend a sign-in code: true the first time, false if it was already used. Creating the marker doc
+// fails with 409 when it exists, so two exchanges of one code can't both succeed.
+export async function markCodeUsed(id: string): Promise<boolean> {
+  const token = await accessToken();
+  const r = await fetch(`${FS_DB}/oauthCodes?documentId=${encodeURIComponent(id)}`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ fields: { at: { integerValue: String(Date.now()) } } }),
+  });
+  if (r.status === 409) return false;
+  if (!r.ok) throw new Error(`code record failed: ${r.status}`);
+  return true;
+}
+
+// Whether the account still exists and isn't disabled (checked when Claude renews its access).
+export async function accountActive(uid: string): Promise<boolean> {
+  const token = await accessToken(SCOPE_ADMIN);
+  const r = await fetch(`${IDTK}/accounts:lookup`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ localId: [uid] }),
+  });
+  if (!r.ok) throw new Error(`account lookup failed: ${r.status}`);
+  const j = (await r.json()) as { users?: { disabled?: boolean }[] };
+  return !!j.users?.length && !j.users[0].disabled;
 }
 
 // ---- Admin -----------------------------------------------------------------

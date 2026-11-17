@@ -3314,12 +3314,23 @@ def kw_search(ch, terms, limit=40):
     return _kw_rows(rows)
 
 
+def _kw_video_rows(con, video_id, cols):
+    """One video's rows from a keyword db, in order. Its chunk ids are "<video id>_NNNN", so a range on
+    the indexed chunk_id finds them at once (matching on video_id alone scans the whole table, seconds
+    on a big channel); the plain match stays as the fallback for any id that doesn't follow the pattern."""
+    rows = con.execute(f"SELECT {cols} FROM info WHERE chunk_id >= ? AND chunk_id < ? AND video_id = ? "
+                       "ORDER BY chunk_id", (video_id + "_", video_id + "`", video_id)).fetchall()
+    return rows or con.execute(f"SELECT {cols} FROM info WHERE video_id=? ORDER BY chunk_id", (video_id,)).fetchall()
+
+
 def kw_rare_search(ch, terms, limit=KW_RARE_PER):
     """The search terms that are rare in this channel (a technical word like سبلان), each with how many
     moments hold it here and its best moments: [(phrase, count, hits)]. In the broad search such a
     moment can rank below dozens that merely repeat the common words and fall past the cut, so
-    retrieve() takes these first, rarest term across the archive first."""
-    parts = _fts_phrases(terms)
+    retrieve() takes these first, rarest term across the archive first. Only Arabic terms count: these
+    channels are Arabic, so an English word is "rare" in them merely because it turns up only in the odd
+    translated or garbled line (a search for "part" put such lines first)."""
+    parts = [ph for ph in _fts_phrases(terms) if re.search(r"[؀-ۿ]", ph)]
     if not parts or not (cpaths(ch)["search"] / "keyword.db").exists():
         return []
     out = []
@@ -4903,12 +4914,15 @@ def moment_count(candidates):
     return sum(len(c.get("_merged") or [1]) for c in candidates)
 
 
-def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False, angles=True):
+def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False, angles=True, given_terms=None):
     """Find the candidate moments for a question: decompose it into angles, union the semantic and
     keyword retrieval (keeping each chunk's best score), then diversify (<=per_vid per video, up to
     cand_max). `channels` (a list of slugs) limits the search to those channels; None/empty = all.
-    `angles=False` skips the decomposition (a Claude call) and searches the question as given - chat
-    mode, where a quick reply matters more than the widest net. Pure data; used by the CLI and the web server."""
+    `angles=False` skips the decomposition (a Claude call) and searches the question as given; a list
+    of phrasings instead searches those alongside the question, also with no Claude call.
+    `given_terms` (keyword terms the caller already has) likewise replaces the Claude call that finds
+    them - the Claude connector, where the user's own Claude supplies both. Pure data; used by the
+    CLI and the web server."""
     import numpy as np
     cand_max = cand_max or CAND_MAX
     anth, settings = ctx["anth"], ctx["settings"]
@@ -4918,9 +4932,12 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False, angle
     sel_ids = [cid for s, cid in ctx["slug_to_cid"].items() if s in sel] if sel else None
     kw_scope = [ch for ch in ctx["kw_scope"] if not sel or ch["slug"] in sel]
     # the Arabic keyword terms (a Claude call) don't depend on the meaning search: fetch them meanwhile
-    kw_pool = ThreadPoolExecutor(max_workers=1) if kw_scope else None
+    kw_pool = ThreadPoolExecutor(max_workers=1) if kw_scope and not given_terms else None
     kw_terms = kw_pool.submit(keyword_terms, anth, settings["tag_model"], q) if kw_pool else None
-    queries = _decompose(anth, settings["tag_model"], q) if angles else [q]  # the question broken into several search angles
+    if isinstance(angles, (list, tuple)):  # the caller's own phrasings
+        queries = list(dict.fromkeys([q] + [a.strip() for a in angles if a and a.strip()]))
+    else:  # the question broken into several search angles
+        queries = _decompose(anth, settings["tag_model"], q) if angles else [q]
     sem_hits, qvs = [], []
     if mat is not None:
         wterms = [w for w in re.findall(r"\w{4,}", q.lower()) if w not in STOP]
@@ -4946,8 +4963,9 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False, angle
         # the question's own words always join the search: the keyword step can "correct" a technical
         # word it doesn't know (السبلان -> السبيلان) and the moments that use it would be missed
         qwords = [w for w in re.findall(r"\w{4,}", q) if w.lower() not in STOP]
-        terms = kw_terms.result() + queries + qwords
-        kw_pool.shutdown(wait=False)
+        terms = (kw_terms.result() if kw_terms else list(given_terms)) + queries + qwords
+        if kw_pool:
+            kw_pool.shutdown(wait=False)
         per = max(40, 160 // len(kw_scope))
         rare_found, lists = [], []
         # each channel is its own SQLite file: search them side by side (one at a time took up to 30 s
@@ -4967,7 +4985,7 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False, angle
         # moments holding a rare search term: the question's own words first (the generated terms can
         # be guesses that happen to be rare), then rarest across the whole archive first (a word in 17
         # moments before one that is merely rare in a few small channels); channels interleave per term
-        own = set(_fts_phrases(qwords))
+        own = set(_fts_phrases(qwords + list(given_terms or [])))  # the caller's own terms count as its words
         total, by_term = {}, {}
         for rare in rare_found:
             for ph, n, rh in rare:
@@ -5045,18 +5063,23 @@ def _apply_channel_names(ctx, q, candidates, channel_names):
     excerpt headers, the findings, the verbatim grouping and the source cards with no further plumbing."""
     if not channel_names:
         return candidates
-    ar = bool(re.search(r"[؀-ۿ]", q))  # the answer follows the question's language
+    override = _channel_name_map(ctx, channel_names, bool(re.search(r"[؀-ۿ]", q)))  # the question's language
+    if not override:
+        return candidates
+    return [{**c, "channel": override.get(c.get("channel"), c.get("channel"))} for c in candidates]
+
+
+def _channel_name_map(ctx, channel_names, ar):
+    """{a channel's own display name: the admin's override for it}, in Arabic or English."""
     override = {}
     for ch in ctx["scope"]:
-        o = channel_names.get(ch["slug"])
+        o = (channel_names or {}).get(ch["slug"])
         if not o:
             continue
         name = (o.get("ar") if ar else o.get("en")) or o.get("en") or o.get("ar")
         if name and name != full_name(ch):
             override[full_name(ch)] = name
-    if not override:
-        return candidates
-    return [{**c, "channel": override.get(c.get("channel"), c.get("channel"))} for c in candidates]
+    return override
 
 
 def answer_question(ctx, q, channels=None, mode=None, style=None, channel_names=None,
@@ -5342,6 +5365,207 @@ def chat_answer_stream(ctx, q, history=None, channels=None, mode=None, channel_n
                                  "channels": len({candidates[n - 1].get("channel") for n in cited})}})
 
 
+# ---------------------------------------------------------------- Claude connector (MCP) tools
+
+# latafti.com/mcp lets an account's own Claude (claude.ai, the Claude apps, Claude Code) search the
+# archive. That Claude does the thinking - the phrasings, the Arabic terms, the written answer - so a
+# search here makes no Claude call of ours unless it brings no Arabic terms. The website checks who is
+# asking, their daily allowance and which channels they may see; these only read the archive. Each
+# returns plain text for Claude to read and whether it is an error: (text, is_error).
+MCP_RESULTS_DEFAULT, MCP_RESULTS_MAX = 20, 40
+MCP_PER_VIDEO = 3      # passages from any one video, so one search spans many lectures
+MCP_TEXT_MAX = 60000   # characters returned by one call, at most
+MCP_READ_MINUTES, MCP_READ_MAX_MINUTES = 5, 20
+MCP_VIDEOS_MAX = 150   # videos listed one by one by find_videos
+
+
+def _mcp_strs(v, most, size):
+    """A tool argument as a short list of distinct non-empty strings (a lone string is a list of one)."""
+    if isinstance(v, str):
+        v = [v]
+    if not isinstance(v, list):
+        return []
+    out = [str(x).strip()[:size] for x in v if isinstance(x, (str, int, float)) and str(x).strip()]
+    return list(dict.fromkeys(out))[:most]
+
+
+def _mcp_scope(ctx, args, channels):
+    """The channels one call searches: those it names (within what the account may see), else all the
+    account may see. Returns (slugs or None for all, error text or None)."""
+    asked = _mcp_strs(args.get("channels"), 60, 120)
+    if not asked:
+        return channels, None
+    known = {c["slug"] for c in ctx["scope"]}
+    ok = [x for x in asked if x in known and (channels is None or x in channels)]
+    if not ok:
+        return None, "None of those channels are in the archive. list_channels gives each channel's slug."
+    return ok, None
+
+
+def _ts_seconds(ts):
+    """A time like "1:02:03", "25:29" or "90" in seconds, or None if it isn't one."""
+    parts = str(ts if ts is not None else "").strip().split(":")
+    try:
+        nums = [float(x) for x in parts]
+    except ValueError:
+        return None
+    if not 1 <= len(nums) <= 3 or any(n < 0 for n in nums):
+        return None
+    sec = 0.0
+    for n in nums:
+        sec = sec * 60 + n
+    return sec
+
+
+def _mcp_clip(blocks, intro, more_note):
+    """Join the blocks under the intro, stopping before MCP_TEXT_MAX; says how many were left out."""
+    out, size = [intro], len(intro)
+    for i, b in enumerate(blocks):
+        if size + len(b) > MCP_TEXT_MAX and i:
+            out.append(more_note.format(n=len(blocks) - i))
+            break
+        out.append(b)
+        size += len(b) + 2
+    return "\n\n".join(out)
+
+
+def _mcp_search(ctx, args, channels, names):
+    q = str(args.get("query") or "").strip()[:500]
+    if not q:
+        return "Give a query: the question or topic to search for.", True
+    scope, err = _mcp_scope(ctx, args, channels)
+    if err:
+        return err, True
+    terms = _mcp_strs(args.get("arabic_terms"), 12, 80)
+    phrasings = _mcp_strs(args.get("other_phrasings"), 5, 300)
+    try:
+        n = int(args.get("max_results") or MCP_RESULTS_DEFAULT)
+    except (TypeError, ValueError):
+        n = MCP_RESULTS_DEFAULT
+    n = max(1, min(MCP_RESULTS_MAX, n))
+    found, _ = retrieve(ctx, q, channels=scope, cand_max=n, per_vid=MCP_PER_VIDEO,
+                        angles=phrasings, given_terms=terms or None)
+    found = _apply_channel_names(ctx, q, found, names)
+    if not found:
+        return (f'Nothing in the archive matched "{q}". Try other phrasings or Arabic terms; if it still '
+                "finds nothing, the archive doesn't cover it.", False)
+    blocks = []
+    for i, c in enumerate(found, 1):
+        head = " | ".join(x for x in (c.get("channel"), f'"{c.get("title")}"', c.get("date") or "",
+                                      f'at {c.get("timestamp")}') if x)
+        blocks.append(f"[{i}] {head}\n{c.get('url')}\nvideo_id: {c.get('video_id')}\n{(c.get('text') or '').strip()}")
+    intro = (f'{len(found)} passages for "{q}", best matches first. Each is what was said at that moment of '
+             "the video, transcribed from speech (expect small slips). Link each point you take to its "
+             "passage's URL; read_transcript gives more of a video.")
+    return _mcp_clip(blocks, intro, "({n} more passages left out to keep this short - search more narrowly.)"), False
+
+
+def _mcp_find_videos(ctx, args, channels, names):
+    titles = _mcp_strs(args.get("titles") or args.get("title"), 4, 150)
+    if not titles:
+        return "Give titles: one or more phrases from the video titles to look for.", True
+    scope, err = _mcp_scope(ctx, args, channels)
+    if err:
+        return err, True
+    found = catalog_search(ctx, titles, scope)
+    if not found:
+        return ("No video titles match " + ", ".join(f'"{t}"' for t in titles) + ". Try other spellings (the "
+                "Arabic and the English name), or search_lectures for what was said.", False)
+    rename = _channel_name_map(ctx, names, bool(re.search(r"[؀-ۿ]", " ".join(titles))))
+    blocks, listed = [], 0
+    for g in found:
+        bits = [rename.get(g["channel"], g["channel"]), f'"{g["title"]}"',
+                f"{g['count']} video{'s' if g['count'] != 1 else ''}"]
+        if len(g["numbers"]) == 2 and g["count"] > 1:
+            bits.append(f"numbered {g['numbers'][0]} to {g['numbers'][1]}"
+                        + (f" (not in the archive: {', '.join(map(str, g['missing']))})" if g["missing"] else ""))
+        lines = ["- " + " | ".join(bits)]
+        shown = g["videos"][:max(0, MCP_VIDEOS_MAX - listed)]
+        listed += len(shown)
+        for v in shown:
+            vid = v["url"].rsplit("/", 1)[-1]
+            lines.append(f"    {v['title']}" + (f" ({v['date']})" if v["date"] else "") + f" | {v['url']} | video_id: {vid}")
+        if len(shown) < g["count"]:
+            lines.append(f"    ...and {g['count'] - len(shown)} more")
+        blocks.append("\n".join(lines))
+    intro = "Videos whose titles match, grouped into series (each series in lesson order):"
+    return _mcp_clip(blocks, intro, "({n} more series left out.)"), False
+
+
+def _mcp_read(ctx, args, channels, names):
+    raw = str(args.get("video_id") or "").strip()
+    m = re.search(r"(?:v=|youtu\.be/|/shorts/|/live/|/embed/)([\w-]{11})", raw)  # a pasted link works too
+    vid = m.group(1) if m else raw
+    if not re.fullmatch(r"[\w-]{6,20}", vid):
+        return "Give a video_id (from search_lectures or find_videos) or the video's YouTube link.", True
+    by_vid = ctx.get("_catalog_by_vid")
+    if by_vid is None:
+        by_vid = ctx["_catalog_by_vid"] = {e[5]: e for e in ctx.get("catalog") or []}
+    entry = by_vid.get(vid)
+    if entry is None or (channels is not None and entry[2] not in channels):
+        return "That video isn't in the archive.", True
+    _, title, slug, chan, date, _ = entry
+    allowed = set(channels) if channels is not None else None
+    rows = [(sec, r) for r in full_transcript(ctx, vid, slug, allowed)
+            if (sec := _ts_seconds(r.get("ts"))) is not None]
+    if not rows:
+        return "No transcript is stored for that video.", True
+    start = 0.0
+    if args.get("start") not in (None, ""):
+        start = _ts_seconds(args.get("start"))
+        if start is None:
+            return 'Give start as a time like "25:29" or "1:02:03".', True
+    try:
+        minutes = float(args.get("minutes") or MCP_READ_MINUTES)
+    except (TypeError, ValueError):
+        minutes = MCP_READ_MINUTES
+    end = start + max(0.5, min(MCP_READ_MAX_MINUTES, minutes)) * 60
+    first = max([i for i, (sec, _) in enumerate(rows) if sec <= start] or [0])  # the stretch already under way
+    window = [(sec, r) for sec, r in rows[first:] if sec < end]
+    if not window:
+        return f"The transcript ends at about {fmt_ts(rows[-1][0])}.", True
+    name = _channel_name_map(ctx, names, bool(re.search(r"[؀-ۿ]", title))).get(chan, chan)
+    head = (f'{name} | "{title}"' + (f" | {date}" if date else "") + f"\n{link(vid, window[0][0])}\n"
+            f"Transcript from {fmt_ts(window[0][0])} (the video's transcript runs to about {fmt_ts(rows[-1][0])}):")
+    body, size = [], 0
+    for sec, r in window:
+        line = f"[{r.get('ts')}] {(r.get('text') or '').strip()}"
+        if size + len(line) > MCP_TEXT_MAX and body:
+            end = sec
+            break
+        body.append(line)
+        size += len(line) + 1
+    tail = (f'\n(It goes on: read again with start "{fmt_ts(end)}" for more.)'
+            if any(sec >= end for sec, _ in rows) else "\n(End of the transcript.)")
+    return head + "\n" + "\n".join(body) + tail, False
+
+
+def _mcp_channels(ctx, args, channels, names):
+    rows = [c for c in ctx["channels_meta"] if channels is None or c["slug"] in channels]
+    lines = [f"{len(rows)} channels (slug | name | videos | how its lectures are searched):"]
+    for c in sorted(rows, key=lambda c: -c["videos"]):
+        o = (names or {}).get(c["slug"]) or {}
+        name = o.get("en") or c["name"]
+        if o.get("ar") and o["ar"] != name:
+            name += " / " + o["ar"]
+        how = "by their exact Arabic words: give arabic_terms" if c["kind"] == "keyword" else "by meaning"
+        lines.append(f"{c['slug']} | {name} | {c['videos']} videos | {how}")
+    return "\n".join(lines), False
+
+
+MCP_TOOLS = {"search_lectures": _mcp_search, "find_videos": _mcp_find_videos,
+             "read_transcript": _mcp_read, "list_channels": _mcp_channels}
+
+
+def mcp_tool(ctx, name, args, channels=None, channel_names=None):
+    """Run one connector tool. `channels` is what the account may see (None = everything, for admins;
+    never an empty list - the website stops before calling with nothing left)."""
+    fn = MCP_TOOLS.get(name)
+    if fn is None:
+        return f"There is no tool called {name}.", True
+    return fn(ctx, args if isinstance(args, dict) else {}, channels, channel_names or {})
+
+
 def transcript_context(ctx, chunk, before=4, after=4):
     """A window of consecutive transcript segments around `chunk`, for the website's source
     preview (3 lines, centre emphasised) and the expand-to-scroll view. Returns (lines, cited_idx)
@@ -5358,8 +5582,7 @@ def transcript_context(ctx, chunk, before=4, after=4):
         con = None
         try:
             con = kw_db(ch)
-            rows = con.execute("SELECT chunk_id, ts, text FROM info WHERE video_id=? ORDER BY chunk_id",
-                               (vid,)).fetchall()
+            rows = _kw_video_rows(con, vid, "chunk_id, ts, text")
         except Exception:
             rows = []
         finally:
@@ -5480,8 +5703,7 @@ def full_transcript(ctx, video_id, slug=None, allowed=None):
             con = None
             try:
                 con = kw_db(ch)
-                rows = con.execute("SELECT ts, text FROM info WHERE video_id=? ORDER BY chunk_id",
-                                   (video_id,)).fetchall()
+                rows = _kw_video_rows(con, video_id, "ts, text")
             except Exception:
                 rows = []
             finally:

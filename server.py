@@ -41,26 +41,34 @@ MAX_PER_IP_HOUR = int(os.environ.get("MAX_PER_IP_HOUR", "30"))  # questions per 
 # Chat messages are far cheaper than a Research answer, so they have their own, roomier counters.
 MAX_CHAT_PER_DAY = int(os.environ.get("MAX_CHAT_PER_DAY", "1500"))
 MAX_CHAT_PER_IP_HOUR = int(os.environ.get("MAX_CHAT_PER_IP_HOUR", "120"))
-_RATE = {"lock": threading.Lock(), "day": "", "day_count": 0, "ip": {}, "chat_count": 0, "chat_ip": {}}
+# Claude connector searches make no Claude call of ours (or one tiny one), so their limits are about the
+# server's load. They're counted per account, not per IP: every one arrives from Anthropic's servers.
+MAX_MCP_PER_DAY = int(os.environ.get("MAX_MCP_PER_DAY", "6000"))
+MAX_MCP_PER_USER_HOUR = int(os.environ.get("MAX_MCP_PER_USER_HOUR", "150"))
+_LIMITS = {"ask": (MAX_PER_DAY, MAX_PER_IP_HOUR), "chat": (MAX_CHAT_PER_DAY, MAX_CHAT_PER_IP_HOUR),
+           "mcp": (MAX_MCP_PER_DAY, MAX_MCP_PER_USER_HOUR)}
+_RATE = {"lock": threading.Lock(), "day": "", "count": {}, "who": {}}
 
 
-def _rate_limited(ip, chat=False):
-    """Returns a message if this request should be blocked, else None (and records the hit)."""
+def _rate_limited(who, kind="ask"):
+    """Returns a message if this request should be blocked, else None (and records the hit). `who` is
+    the visitor's IP (or an account, for the connector); `kind` picks the counters: ask | chat | mcp."""
     now = time.time()
     today = time.strftime("%Y-%m-%d", time.gmtime(now))
-    count_key, ip_key = ("chat_count", "chat_ip") if chat else ("day_count", "ip")
-    day_max, hour_max = (MAX_CHAT_PER_DAY, MAX_CHAT_PER_IP_HOUR) if chat else (MAX_PER_DAY, MAX_PER_IP_HOUR)
+    day_max, hour_max = _LIMITS[kind]
+    what = "searches" if kind == "mcp" else "questions"
     with _RATE["lock"]:
         if _RATE["day"] != today:
-            _RATE.update({"day": today, "day_count": 0, "ip": {}, "chat_count": 0, "chat_ip": {}})
-        if _RATE[count_key] >= day_max:
-            return "The archive has reached today's question limit. Please try again tomorrow."
-        hits = [t for t in _RATE[ip_key].get(ip, []) if now - t < 3600]
+            _RATE.update({"day": today, "count": {}, "who": {}})
+        if _RATE["count"].get(kind, 0) >= day_max:
+            return f"The archive has reached today's limit of {what}. Please try again tomorrow."
+        seen = _RATE["who"].setdefault(kind, {})
+        hits = [t for t in seen.get(who, []) if now - t < 3600]
         if len(hits) >= hour_max:
-            return "That's a lot of questions in a short time - please pause a bit and try again."
+            return f"That's a lot of {what} in a short time - please pause a bit and try again."
         hits.append(now)
-        _RATE[ip_key][ip] = hits
-        _RATE[count_key] += 1
+        seen[who] = hits
+        _RATE["count"][kind] = _RATE["count"].get(kind, 0) + 1
         return None
 
 
@@ -363,7 +371,7 @@ def ask_stream(req: AskRequest, request: Request, x_brain_key: str = Header(None
     if not q:
         raise HTTPException(status_code=400, detail="empty question")
     ip = (x_client_ip or (request.client.host if request.client else "") or "unknown").split(",")[0].strip()
-    blocked = _rate_limited(ip, chat=bool(req.chat))
+    blocked = _rate_limited(ip, "chat" if req.chat else "ask")
     if blocked:
         raise HTTPException(status_code=429, detail=blocked)
     now = time.time()
@@ -431,6 +439,32 @@ def ask(req: AskRequest, request: Request, x_brain_key: str = Header(None),
 
 
 MOMENTS_MAX = 5000  # refs per request: well above the deepest answer's relevant set
+
+
+class McpCall(BaseModel):
+    tool: str
+    arguments: dict | None = None
+    channels: list[str] | None = None  # what this account may see; None = everything (admins)
+    channel_names: dict[str, dict[str, str]] | None = None  # slug -> {en, ar} admin name overrides
+
+
+@app.post("/mcp/call")
+def mcp_call(req: McpCall, x_brain_key: str = Header(None), x_user_id: str = Header(None)):
+    """One tool call from an account's Claude, via the website's /mcp endpoint (which has already checked
+    who is asking, their daily allowance and their channels). Read-only: plain text back for Claude."""
+    _check_key(x_brain_key)
+    ctx = _ctx()
+    if req.channels is not None and not req.channels:
+        return {"text": "There are no channels to search.", "is_error": True}
+    blocked = _rate_limited(x_user_id or "?", "mcp")
+    if blocked:
+        return {"text": blocked, "is_error": True}
+    try:
+        text, is_error = brain.mcp_tool(ctx, req.tool, req.arguments or {}, req.channels, req.channel_names)
+    except Exception as e:
+        print(f"mcp {req.tool} failed: {type(e).__name__}: {str(e)[:200]}", flush=True)
+        return {"text": "The archive couldn't run that just now - try again.", "is_error": True}
+    return {"text": text, "is_error": is_error}
 
 
 class MomentsRequest(BaseModel):

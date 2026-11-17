@@ -8,7 +8,7 @@ export const metadata: Metadata = {
 
 export default function PrivacyPage() {
   return (
-    <LegalShell title="Privacy Policy" updated="30 October 2026">
+    <LegalShell title="Privacy Policy" updated="17 November 2026">
       <p>
         La Tafti (&ldquo;the service&rdquo;, &ldquo;we&rdquo;) is a free tool for searching and asking
         questions across a library of Islamic lecture transcripts. This policy explains what we collect,
@@ -44,6 +44,15 @@ export default function PrivacyPage() {
         avoid including sensitive personal information in your questions. Answers link to public YouTube
         videos at the cited moments; opening a link takes you to YouTube under its own terms and privacy
         policy.
+      </p>
+
+      <h2>Using La Tafti in Claude</h2>
+      <p>
+        If you connect La Tafti to Claude as a connector, Claude sends us the searches it makes for you (the
+        search words, never your Claude conversation), and we send back passages from the archive. We keep a
+        daily count of those searches on your account, as with answers. Claude only gets access after you sign
+        in and press Allow, and &ldquo;Disconnect Claude&rdquo; in the sidebar ends that access everywhere.
+        What Claude does with the results is covered by Anthropic&rsquo;s own terms and privacy policy.
       </p>
 
       <h2>Where your data lives</h2>

@@ -7,11 +7,13 @@ import { useLang, LangToggle, type Lang } from "../lib/i18n";
 import { db } from "../lib/firebase";
 import SignIn from "./SignIn";
 import UpdatePopup from "./UpdatePopup";
+import ClaudePanel from "./ClaudePanel";
 
 const DAILY_CAP = 20; // free answers per user per day (keep in sync with the server's cap)
 const GUEST_CAP = 2; // free questions for a guest (anonymous) before they're asked to sign up
 const CHAT_CAP = 30; // chat messages per user per day (keep in sync with the server's CHAT_CAP)
 const GUEST_CHAT_CAP = 5;
+const MCP_CAP = 200; // Claude-connector searches per account per day (keep in sync with the server's MCP_CAP)
 // typical cost of one chat message per depth (no read-everything step, so far below a Research answer)
 const CHAT_USD: Record<string, number> = { quick: 0.02, standard: 0.03, deep: 0.05 };
 const CHAT_KEEPS: Record<string, string> = { quick: "~60", standard: "~150", deep: "~300" };
@@ -753,6 +755,9 @@ export default function Home() {
   const [currentChatId, setCurrentChatId] = useState<string | null>(null);
   const [isAdmin, setIsAdmin] = useState(false);
   const [adminOpen, setAdminOpen] = useState(false);
+  const [claudeOpen, setClaudeOpen] = useState(false); // the "Use in Claude" panel
+  const [mcpUsed, setMcpUsed] = useState(0);
+  const [mcpCap, setMcpCap] = useState(MCP_CAP);
   const [guestOpen, setGuestOpen] = useState(false);
   // Research (one long cited briefing) or Chat (a conversation); remembered on this device
   const [view, setViewState] = useState<"research" | "chat">("research");
@@ -813,12 +818,18 @@ export default function Home() {
       doc(db, "users", user.uid),
       (snap) => {
         const d = snap.data() as
-          | { day?: string; count?: number; cap?: number; chatDay?: string; chatCount?: number; chatCap?: number }
+          | {
+              day?: string; count?: number; cap?: number;
+              chatDay?: string; chatCount?: number; chatCap?: number;
+              mcpDay?: string; mcpCount?: number; mcpCap?: number;
+            }
           | undefined;
         setUsedToday(d && d.day === today ? d.count ?? 0 : 0);
         setDailyCap(typeof d?.cap === "number" && d.cap > 0 ? d.cap : DAILY_CAP);
         setChatUsed(d && d.chatDay === today ? d.chatCount ?? 0 : 0);
         setChatCap(typeof d?.chatCap === "number" && d.chatCap > 0 ? d.chatCap : CHAT_CAP);
+        setMcpUsed(d && d.mcpDay === today ? d.mcpCount ?? 0 : 0);
+        setMcpCap(typeof d?.mcpCap === "number" && d.mcpCap > 0 ? d.mcpCap : MCP_CAP);
       },
       () => {
         setUsedToday(0);
@@ -1518,8 +1529,10 @@ export default function Home() {
         isGuest={!!user.isAnonymous}
         isAdmin={isAdmin}
         onOpenAdmin={() => setAdminOpen(true)}
+        onOpenClaude={() => setClaudeOpen(true)}
       />
       {adminOpen && <AdminPanel onClose={() => setAdminOpen(false)} />}
+      {claudeOpen && <ClaudePanel used={mcpUsed} cap={mcpCap} onClose={() => setClaudeOpen(false)} />}
       {guestOpen && <GuestPrompt onClose={() => setGuestOpen(false)} />}
       {!user.isAnonymous && <UpdatePopup />}
       <div className={`transition-[margin] duration-200 ${sidebarOpen ? "ltr:sm:ml-[264px] rtl:sm:mr-[264px]" : ""}`}>
@@ -1823,6 +1836,7 @@ function Sidebar({
   isGuest,
   isAdmin,
   onOpenAdmin,
+  onOpenClaude,
 }: {
   open: boolean;
   onToggle: () => void;
@@ -1840,6 +1854,7 @@ function Sidebar({
   isGuest: boolean;
   isAdmin: boolean;
   onOpenAdmin: () => void;
+  onOpenClaude: () => void;
 }) {
   const { t } = useLang();
   return (
@@ -1915,6 +1930,18 @@ function Sidebar({
             <span>{t("sidebar.theme")}</span>
             <ThemeSelector />
           </div>
+          {!isGuest && (
+            <button
+              type="button"
+              onClick={onOpenClaude}
+              className="flex w-full items-center gap-2 border-t border-line pt-2.5 text-start text-[13px] text-muted transition hover:text-ink"
+            >
+              <svg width="15" height="15" viewBox="0 0 24 24" fill="none" aria-hidden>
+                <path d="M9 7V3m6 4V3M7 7h10v4a5 5 0 0 1-10 0V7Zm5 9v5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+              </svg>
+              {t("sidebar.claude")}
+            </button>
+          )}
           {isAdmin && (
             <button
               type="button"

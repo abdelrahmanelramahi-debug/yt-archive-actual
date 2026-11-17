@@ -57,9 +57,21 @@ const Fixes = (
   </svg>
 );
 
+const Plug = (
+  <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden className={ICON}>
+    <path d="M9 7V3m6 4V3M7 7h10v4a5 5 0 0 1-10 0V7Zm5 9v5" stroke="currentColor" strokeWidth="1.6" strokeLinecap="round" strokeLinejoin="round" />
+  </svg>
+);
+
 // Updates, newest first. Add a new entry at the TOP (with a fresh id) to re-show the pop-up; older
 // entries stay as flip-back pages. The id of the top entry is what "seen" is tracked against.
 const UPDATES: { id: string; items: { key: string; icon: ReactNode }[] }[] = [
+  {
+    id: "2026-11-17b",
+    items: [
+      { key: "claude", icon: Plug },
+    ],
+  },
   {
     id: "2026-11-17",
     items: [
