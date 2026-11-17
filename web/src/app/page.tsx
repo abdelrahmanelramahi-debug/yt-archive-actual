@@ -14,7 +14,7 @@ const CHAT_CAP = 30; // chat messages per user per day (keep in sync with the se
 const GUEST_CHAT_CAP = 5;
 // typical cost of one chat message per depth (no read-everything step, so far below a Research answer)
 const CHAT_USD: Record<string, number> = { quick: 0.02, standard: 0.03, deep: 0.05 };
-const CHAT_KEEPS: Record<string, string> = { quick: "~20", standard: "~40", deep: "~80" };
+const CHAT_KEEPS: Record<string, string> = { quick: "~60", standard: "~150", deep: "~300" };
 
 // one saved item in the user's history: a Research question+answer, or (kind "chat") a whole Chat
 // conversation, whose `q` is its first message and `turns` its exchanges
@@ -1612,17 +1612,32 @@ export default function Home() {
               {/* compact dropdowns: always on phones, and on desktop too once a question is asked
                   (the ask bar sits at the top then, so the expanded controls would just clutter) */}
               <div className={`${chatActive ? "mb-2.5" : "mb-4"} flex items-center justify-end gap-2 ${landing ? "sm:hidden" : ""}`}>
-                {!chatView && <StyleToggle value={style} onChange={setStyle} />}
-                <ChannelPicker channels={channels} selected={selected} onChange={setSelected} compact dropUp={landing || chatActive} />
-                <ModeDropup
-                  modes={displayModes}
-                  mode={mode}
-                  onChange={setMode}
-                  dropUp={landing || chatActive}
-                  moments={momentsLabel}
-                  keeps={chatView ? CHAT_KEEPS : undefined}
-                />
-                {noneSelected && <span className="text-[13px] text-danger">{t("controls.pickChannel")}</span>}
+                {/* the controls sit in one group; the "pick a channel" note floats outside it (out of the
+                    layout), so nothing shifts when it appears: to the left of the controls, or - on a
+                    phone in Research, where the row is full - just above them */}
+                <div className="relative flex items-center gap-2">
+                  {noneSelected && (
+                    <span
+                      className={`pointer-events-none absolute whitespace-nowrap text-[13px] text-danger ${
+                        chatView
+                          ? "end-full top-1/2 me-2 -translate-y-1/2"
+                          : "bottom-full end-0 mb-1.5 sm:bottom-auto sm:end-full sm:top-1/2 sm:mb-0 sm:me-2 sm:-translate-y-1/2"
+                      }`}
+                    >
+                      {t("controls.pickChannel")}
+                    </span>
+                  )}
+                  {!chatView && <StyleToggle value={style} onChange={setStyle} />}
+                  <ChannelPicker channels={channels} selected={selected} onChange={setSelected} compact dropUp={landing || chatActive} />
+                  <ModeDropup
+                    modes={displayModes}
+                    mode={mode}
+                    onChange={setMode}
+                    dropUp={landing || chatActive}
+                    moments={momentsLabel}
+                    keeps={chatView ? CHAT_KEEPS : undefined}
+                  />
+                </div>
               </div>
 
               {/* desktop landing only: channel + scope (left); mode + cost + explainer (right) */}
@@ -2483,7 +2498,14 @@ function ChatTurnView({
           <div>
             <div className="relative h-0.5 w-40 overflow-hidden rounded-full bg-line sweep" />
             <p className="mt-3 text-sm text-muted">
-              {tn.stage === "writing" ? t("chat.writing") : momentsLabel ? t("stage.2n", { n: momentsLabel }) : t("chat.searching")}…
+              {tn.stage === "writing"
+                ? t("chat.writing")
+                : tn.stage === "reading"
+                  ? t("stage.3")
+                  : momentsLabel
+                    ? t("stage.2n", { n: momentsLabel })
+                    : t("chat.searching")}
+              …
             </p>
           </div>
         )}

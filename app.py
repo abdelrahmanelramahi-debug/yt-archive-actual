@@ -1629,8 +1629,15 @@ def credit_out_warning():
             "  console.anthropic.com/settings/billing. A separate tagging key (ANTHROPIC_TAG_API_KEY) prevents this.")
 
 
+def _no_thinking(model):
+    """Haiku 5.x thinks by default, and on a short call the thinking can use up the whole max_tokens
+    and leave no text at all (the question splitter came back empty this way). These calls are short
+    rewrites and extractions that don't need it. Only Haiku: Sonnet 5.5 rejects disabled thinking."""
+    return {"thinking": {"type": "disabled"}} if str(model).startswith("claude-haiku-5") else {}
+
+
 def call_claude(client, model, prompt, max_tokens):
-    msg = client.messages.create(model=model, max_tokens=max_tokens,
+    msg = client.messages.create(model=model, max_tokens=max_tokens, **_no_thinking(model),
                                  messages=[{"role": "user", "content": prompt}])
     text = "".join(b.text for b in msg.content if getattr(b, "type", "") == "text")
     return text, claude_cost(model, msg.usage)
@@ -3272,24 +3279,63 @@ def kw_index_channel(ch, status_fn=None):
     return len(new)
 
 
-def kw_search(ch, terms, limit=40):
+_KW_SELECT = ("SELECT info.chunk_id, info.video_id, info.title, info.date, info.ts, info.url, "
+              "info.channel, info.type, info.text FROM fts JOIN info ON info.rowid = fts.rowid "
+              "WHERE fts MATCH ? ORDER BY bm25(fts) LIMIT ?")
+KW_RARE_MAX = 40  # a search term found in at most this many moments of a channel counts as rare there
+KW_RARE_PER = 8   # moments holding a rare term, taken from each channel ahead of the broad search
+
+
+def _fts_phrases(terms):
+    """The search terms as FTS phrases (normalised; a lone word also matches as a prefix), de-duplicated."""
     parts = []
     for t in terms:
         toks = norm_text(t).split()
         if toks:
             parts.append('"' + " ".join(toks) + '"' + ("*" if len(toks) == 1 and len(toks[0]) >= 3 else ""))
+    return list(dict.fromkeys(parts))
+
+
+def _kw_rows(rows):
+    return [{"chunk_id": r[0], "video_id": r[1], "title": r[2], "date": r[3], "timestamp": r[4], "url": r[5],
+             "channel": r[6], "type": r[7], "text": r[8]} for r in rows]
+
+
+def kw_search(ch, terms, limit=40):
+    parts = _fts_phrases(terms)
     if not parts or not (cpaths(ch)["search"] / "keyword.db").exists():
         return []
     con = kw_db(ch)
     try:
-        rows = con.execute("SELECT info.chunk_id, info.video_id, info.title, info.date, info.ts, info.url, "
-                           "info.channel, info.type, info.text FROM fts JOIN info ON info.rowid = fts.rowid "
-                           "WHERE fts MATCH ? ORDER BY bm25(fts) LIMIT ?", (" OR ".join(dict.fromkeys(parts)), limit)).fetchall()
+        rows = con.execute(_KW_SELECT, (" OR ".join(parts), limit)).fetchall()
     except Exception:
         rows = []
     con.close()
-    return [{"chunk_id": r[0], "video_id": r[1], "title": r[2], "date": r[3], "timestamp": r[4], "url": r[5],
-             "channel": r[6], "type": r[7], "text": r[8]} for r in rows]
+    return _kw_rows(rows)
+
+
+def kw_rare_search(ch, terms, limit=KW_RARE_PER):
+    """The search terms that are rare in this channel (a technical word like سبلان), each with how many
+    moments hold it here and its best moments: [(phrase, count, hits)]. In the broad search such a
+    moment can rank below dozens that merely repeat the common words and fall past the cut, so
+    retrieve() takes these first, rarest term across the archive first."""
+    parts = _fts_phrases(terms)
+    if not parts or not (cpaths(ch)["search"] / "keyword.db").exists():
+        return []
+    out = []
+    con = kw_db(ch)
+    try:
+        for ph in parts:
+            try:  # counting stops at KW_RARE_MAX + 1, so a common term costs no more than a rare one
+                n = con.execute("SELECT count(*) FROM (SELECT rowid FROM fts WHERE fts MATCH ? LIMIT ?)",
+                                (ph, KW_RARE_MAX + 1)).fetchone()[0]
+                if 0 < n <= KW_RARE_MAX:
+                    out.append((ph, n, _kw_rows(con.execute(_KW_SELECT, (ph, limit)).fetchall())))
+            except Exception:
+                continue
+    finally:
+        con.close()
+    return out
 
 
 # ---------- Quran & hadith quotes: which moments recite a verse or a hadith ----------
@@ -4804,6 +4850,59 @@ def load_search(settings, scope):
             "total_videos": len({c["video_id"] for c in chunks}) + kw_videos}
 
 
+MERGE_RUN_MAX = 4  # at most this many back-to-back moments are joined into one passage
+
+
+def _chunk_pos(c):
+    """A moment's position in its video (the number at the end of its chunk id)."""
+    m = re.search(r"_(\d+)$", c.get("chunk_id") or "")
+    return int(m.group(1)) if m else c.get("n")
+
+
+def merge_adjacent(candidates):
+    """Join moments that follow straight on from each other in the same video into one passage, so
+    the reader and writer see a sentence that runs across a moment boundary as the one passage it
+    is (a moment ending on "...they are called" and the next one carrying on). Keeps the order of
+    first appearance; a joined passage keeps its first moment's id, time and link, and lists every
+    moment it holds in `_merged` (for counts and the relevant-moments download)."""
+    where = {}
+    for i, c in enumerate(candidates):
+        pos = _chunk_pos(c)
+        if pos is not None:
+            where[(c.get("video_id"), pos)] = i
+    used, out = set(), []
+    for i, c in enumerate(candidates):
+        if i in used:
+            continue
+        pos, vid = _chunk_pos(c), c.get("video_id")
+        if pos is None:
+            used.add(i)
+            out.append(c)
+            continue
+        start = pos
+        while (vid, start - 1) in where and where[(vid, start - 1)] not in used and pos - start < MERGE_RUN_MAX - 1:
+            start -= 1
+        run, p = [], start
+        while (vid, p) in where and where[(vid, p)] not in used and len(run) < MERGE_RUN_MAX:
+            run.append(where[(vid, p)])
+            p += 1
+        if i not in run:
+            run = [i]
+        used.update(run)
+        if len(run) == 1:
+            out.append(c)
+            continue
+        parts = [candidates[j] for j in run]
+        out.append({**parts[0], "text": " ".join(x.get("text", "") for x in parts),
+                    "_merged": [x.get("chunk_id") for x in parts]})
+    return out
+
+
+def moment_count(candidates):
+    """How many moments the candidates hold (a joined passage counts each moment in it)."""
+    return sum(len(c.get("_merged") or [1]) for c in candidates)
+
+
 def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False, angles=True):
     """Find the candidate moments for a question: decompose it into angles, union the semantic and
     keyword retrieval (keeping each chunk's best score), then diversify (<=per_vid per video, up to
@@ -4842,25 +4941,42 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False, angle
                 if sc > best.get(int(i), -2.0):
                     best[int(i)] = sc
         sem_hits = [chunks[i] for i, _ in sorted(best.items(), key=lambda kv: -kv[1])]
-    kw_hits = []
+    kw_hits, rare_hits = [], []
     if kw_scope:
-        terms = kw_terms.result() + queries
+        # the question's own words always join the search: the keyword step can "correct" a technical
+        # word it doesn't know (السبلان -> السبيلان) and the moments that use it would be missed
+        qwords = [w for w in re.findall(r"\w{4,}", q) if w.lower() not in STOP]
+        terms = kw_terms.result() + queries + qwords
         kw_pool.shutdown(wait=False)
         per = max(40, 160 // len(kw_scope))
-        lists = []
+        rare_found, lists = [], []
         # each channel is its own SQLite file: search them side by side (one at a time took up to 30 s
         # on a cold disk); the results keep the channel order, so the interleave below is unchanged
         with ThreadPoolExecutor(max_workers=min(8, len(kw_scope))) as ex:
-            found = list(ex.map(lambda ch: kw_search(ch, terms, per), kw_scope))
-        for ch, hits in zip(kw_scope, found):
+            found = list(ex.map(lambda ch: (kw_rare_search(ch, terms), kw_search(ch, terms, per)), kw_scope))
+        for ch, (rare, hits) in zip(kw_scope, found):
             nm = full_name(ch)  # current display name, so a rename shows without re-indexing
-            for h in hits:
+            for h in hits + [h for _, _, rh in rare for h in rh]:
                 h["channel"] = nm
                 h["_slug"] = ch["slug"]
                 h["_kw"] = True
+            rare_found.append(rare)
             lists.append(hits)
         for i in range(max((len(x) for x in lists), default=0)):  # interleave channels
             kw_hits += [x[i] for x in lists if i < len(x)]
+        # moments holding a rare search term: the question's own words first (the generated terms can
+        # be guesses that happen to be rare), then rarest across the whole archive first (a word in 17
+        # moments before one that is merely rare in a few small channels); channels interleave per term
+        own = set(_fts_phrases(qwords))
+        total, by_term = {}, {}
+        for rare in rare_found:
+            for ph, n, rh in rare:
+                total[ph] = total.get(ph, 0) + n
+                by_term.setdefault(ph, []).append(rh)
+        for ph in sorted(total, key=lambda p: (p not in own, total[p])):
+            group = by_term[ph]
+            for i in range(max((len(x) for x in group), default=0)):
+                rare_hits += [x[i] for x in group if i < len(x)]
     # summary-style routing: find the videos whose overall content best matches the question (by
     # centroid), pull their strongest clips, and union those in - so a video that is *about* the
     # question contributes even when no single moment topped the direct search.
@@ -4887,7 +5003,8 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False, angle
                     break  # clips are sorted strongest-first, so the rest are weaker too
                 route_hits.append(chunks[int(rows[int(k)])])
     # cast a wide net: many moments across many videos, then synthesise with a deep map-reduce
-    streams = [x for x in (sem_hits, kw_hits, route_hits) if x]
+    # the rare-term moments lead (capped at a fifth of the set, so they never crowd out the rest)
+    streams = [x for x in (rare_hits[:max(10, cand_max // 5)], sem_hits, kw_hits, route_hits) if x]
     candidates, per_video, seen = [], {}, set()
     idx = [0] * len(streams)
     while len(candidates) < cand_max and any(idx[j] < len(streams[j]) for j in range(len(streams))):
@@ -4903,7 +5020,7 @@ def retrieve(ctx, q, channels=None, cand_max=None, per_vid=6, route=False, angle
                 break
             if len(candidates) >= cand_max:
                 break
-    return candidates, queries
+    return merge_adjacent(candidates), queries
 
 
 def synthesize(ctx, q, candidates, style=None, answer_max=None):
@@ -4916,7 +5033,7 @@ def synthesize(ctx, q, candidates, style=None, answer_max=None):
     cov_c = len({candidates[n - 1].get("channel") for n in cited}) or len(ctx["scope"])
     return {"answer": answer, "usd": usd, "cited": cited,
             "relevant": relevant_refs(candidates, relevant if relevant is not None else cited),
-            "coverage": {"moments": len(candidates),
+            "coverage": {"moments": moment_count(candidates),
                          "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}}
 
 
@@ -5017,16 +5134,18 @@ def answer_question_stream(ctx, q, channels=None, mode=None, style=None, channel
     cov_c = len({candidates[n - 1].get("channel") for n in sorted(emitted)}) or len(ctx["scope"])
     yield ("done", {"usd": map_cost + reduce_cost,
                     "relevant": relevant_refs(candidates, relevant if relevant is not None else sorted(emitted)),
-                    "coverage": {"moments": len(candidates),
+                    "coverage": {"moments": moment_count(candidates),
                                  "videos": len({c["video_id"] for c in candidates}), "channels": cov_c}})
 
 
 # ---- Chat mode --------------------------------------------------------------------------------
-# A back-and-forth conversation instead of one long briefing. Each message pulls a small set of the
-# best moments (no map step) and the answer model replies conversationally, citing them. It never
+# A back-and-forth conversation instead of one long briefing. Each message is searched like a
+# Research question (several angles, Arabic terms, the keyword channels), the cheap reader sifts the
+# moments for what addresses it, and the answer model replies conversationally, citing them. It never
 # gives a ruling of its own: rulings come only from what the channels said in those moments.
 # (moments kept, per video, reply length in tokens) per depth.
-CHAT_MODES = {"quick": (20, 3, 1500), "standard": (40, 4, 2500), "deep": (80, 5, 4000)}
+CHAT_MODES = {"quick": (60, 3, 1500), "standard": (150, 5, 2500), "deep": (300, 6, 4000)}
+CHAT_FULL_TEXT = 20  # after the reader sifts the moments, the writer also gets this many in full, to quote
 CHAT_HISTORY_MAX = 12       # earlier messages sent along (6 exchanges)
 CHAT_TURN_CHARS = 6000      # each earlier message is clipped to this
 
@@ -5171,9 +5290,21 @@ def chat_answer_stream(ctx, q, history=None, channels=None, mode=None, channel_n
     search_q, title_terms, usd = _chat_search_query(anth, settings["tag_model"], q, hist)
     candidates = []
     if search_q:
-        candidates, _ = retrieve(ctx, search_q, channels=channels, cand_max=cmax, per_vid=per_vid,
-                                 route=route, angles=False)
+        candidates, _ = retrieve(ctx, search_q, channels=channels, cand_max=cmax, per_vid=per_vid, route=route)
         candidates = _apply_channel_names(ctx, q, candidates, channel_names)
+    relevant, material = None, ""
+    if candidates:
+        if len(candidates) > 40:
+            yield ("status", "reading")
+        findings, u, relevant = _map_findings(anth, settings, search_q, candidates)
+        usd += u
+        if relevant is None:  # a small set: the writer reads the moments themselves
+            material = "Archive excerpts for my newest message:\n\n" + findings
+        elif relevant:
+            numbered = _numbered_excerpts(candidates)
+            full = "\n\n".join(numbered[n - 1] for n in relevant[:CHAT_FULL_TEXT])
+            material = ("Findings from the archive for my newest message (each starts with its channel and ends "
+                        "with its excerpt number):\n" + findings + "\n\nThe fullest of those excerpts, word for word:\n\n" + full)
     found = catalog_search(ctx, title_terms, channels) if title_terms else []
     if found:  # the page lists these as links under the reply
         yield ("videos", [{"channel": g["channel"], "title": g["title"], "count": g["count"],
@@ -5184,10 +5315,10 @@ def chat_answer_stream(ctx, q, history=None, channels=None, mode=None, channel_n
                      "them to me below your reply as a list of links):\n" + _catalog_block(found))
     elif title_terms:
         parts.append("(No video titles in the archive match: " + ", ".join(title_terms) + ".)")
-    if candidates:
-        parts.append("Archive excerpts for my newest message:\n\n" + "\n\n".join(_numbered_excerpts(candidates)))
+    if material:
+        parts.append(material)
     elif search_q:
-        parts.append("(The search of what was said found nothing for this message.)")
+        parts.append("(The search of what was said found nothing that addresses this message.)")
     # a short reminder right next to the message: rules stated only at the top fade in a long conversation
     reminder = ("(Reply by the rules: rulings only from these; put the excerpt number like [3] after every point "
                 "taken from them; never mention excerpts, clips, or that anything is cut off.)")
@@ -5205,8 +5336,8 @@ def chat_answer_stream(ctx, q, history=None, channels=None, mode=None, channel_n
     cited = _cited_numbers(answer, len(candidates))
     for n in cited:
         yield ("source", source_json(ctx, candidates[n - 1], n))
-    yield ("done", {"usd": usd, "relevant": relevant_refs(candidates, sorted(cited)),
-                    "coverage": {"moments": len(candidates),
+    yield ("done", {"usd": usd, "relevant": relevant_refs(candidates, relevant if relevant else sorted(cited)),
+                    "coverage": {"moments": moment_count(candidates),
                                  "videos": len({c["video_id"] for c in candidates}),
                                  "channels": len({candidates[n - 1].get("channel") for n in cited})}})
 
@@ -5374,7 +5505,8 @@ def relevant_refs(candidates, numbers):
     for n in sorted(set(numbers or [])):
         if 0 < n <= len(candidates):
             c = candidates[n - 1]
-            out.append({"c": c.get("chunk_id"), "s": c.get("_slug") or ""})
+            for cid in c.get("_merged") or [c.get("chunk_id")]:
+                out.append({"c": cid, "s": c.get("_slug") or ""})
     return out
 
 
@@ -5463,7 +5595,7 @@ def ask(settings):
             say(f"{Y}Nothing matched. Try other words, or ask in Arabic.{X}")
             continue
         cv = len({c["video_id"] for c in candidates})
-        say(f"{D}Reading {len(candidates)} moments across {cv} videos, then writing...{X}")
+        say(f"{D}Reading {moment_count(candidates)} moments across {cv} videos, then writing...{X}")
         try:
             res = synthesize(ctx, q, candidates)
         except Exception as e:
@@ -5476,7 +5608,7 @@ def ask(settings):
         add_spend("claude", usd, "question")
         say("")
         say(render_answer(answer))
-        say(f"\n{D}Drew on {len(candidates)} moments across {cv} videos; cited {len(cited)} "
+        say(f"\n{D}Drew on {moment_count(candidates)} moments across {cv} videos; cited {len(cited)} "
             f"from {cov_c} channel{'s' if cov_c != 1 else ''}.{X}")
         say(f"\n{C}Sources{X} {D}(Ctrl+click a link to open the video at that moment){X}")
         multi = len({c.get("channel") for c in candidates}) > 1
